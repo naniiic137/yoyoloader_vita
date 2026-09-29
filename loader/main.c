@@ -866,6 +866,13 @@ void main_loop() {
 		}
 
 		tex_lru_frame++;
+		if (debugMode && tex_lru_frame % 300 == 0) {
+			extern unsigned newlib_heap_used(void);
+			debugPrintf("[MEM] newlib peak %u KB / %u KB | vitaGL free: RAM %u KB, VRAM %u KB, PHYCONT %u KB, total %u KB | pages %u KB in %d
+",
+				newlib_heap_used() / 1024, _newlib_heap_size / 1024, vglMemFree(VGL_MEM_RAM) / 1024, vglMemFree(VGL_MEM_VRAM) / 1024,
+				vglMemFree(VGL_MEM_PHYCONT) / 1024, vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
+		}
 		if (!is_portrait)
 			Java_com_yoyogames_runner_RunnerJNILib_Process(fake_env, 0, SCREEN_W, SCREEN_H, sensor.accelerometer.x, sensor.accelerometer.y, sensor.accelerometer.z, 0, 0, 60.0f);
 		else
@@ -1119,7 +1126,7 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 #endif
 				FILE *f = fopen(fname, "rb");
 				if (f) {
-					debugPrintf("Loading externalized texture %s (Raw ID: 0x%X)\n", fname, data[1]);
+					debugPrintf("Loading externalized texture %s (Raw ID: 0x%X) [vitaGL free %u KB, pages %u KB in %d]\n", fname, data[1], vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 					fseek(f, 0, SEEK_END);
 					uint32_t size = ftell(f) - 0x34;
 					uint32_t metadata_size;

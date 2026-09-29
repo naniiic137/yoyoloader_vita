@@ -30,6 +30,12 @@ fail:
 	return (void*) prev_heap_end;
 }
 
+// Peak newlib heap use (sbrk never shrinks), for the debug memory report
+unsigned newlib_heap_used(void)
+{
+	return _newlib_heap_base ? (unsigned)(_newlib_heap_cur - _newlib_heap_base) : 0;
+}
+
 void _init_vita_heap(void)
 {
 	// Create a mutex to use inside _sbrk_r
@@ -67,6 +73,15 @@ void _init_vita_heap(void)
 			_newlib_heap_size = 300 * 1024 * 1024;
 		} else {
 			_newlib_heap_size = 240 * 1024 * 1024;
+		}
+		// newlibMB=<n> overrides the heap size; whatever it doesn't take goes to vitaGL
+		s = sceClibStrstr(t, "newlibMB=");
+		if (s) {
+			unsigned mb = 0;
+			for (s += 9; *s >= '0' && *s <= '9'; s++)
+				mb = mb * 10 + (*s - '0');
+			if (mb >= 64 && mb <= 400)
+				_newlib_heap_size = mb * 1024 * 1024;
 		}
 	}
 	else
