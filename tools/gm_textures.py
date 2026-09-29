@@ -152,6 +152,17 @@ def placeholder_png(i, w, h):
             + _png_chunk(b'IEND', b''))
 
 
+def placeholder_qoi(i, w, h):
+    # A QOI ("fioq") header with the page's real size (the runner's ReadQOIFFileHeader only
+    # reads width/height at +4/+6) plus the "yyLdYYLP" marker and page index at offset 37.
+    # The page then loads through the loader's LoadTextureFromQOIF hook, the same route as
+    # runner-decoded pages, which reads assets/<i>.pvr instead of decoding anything
+    b = bytearray(b'fioq' + struct.pack('<HHI', w, h, 0))
+    b += bytes(37 - len(b))
+    b += b'yyLdYYLP' + struct.pack('<I', i)
+    return bytes(b)
+
+
 def compress_sfx(apk, sond_entries):
     """Re-encodes embedded uncompressed WAV sounds (flags 0x65) as OGG Vorbis and marks
     them compressed (0x66). Returns {audiogroup file: new bytes} and the patched entries."""
@@ -253,7 +264,7 @@ def main():
         # placeholder blob, 128-byte aligned like GameMaker does
         while (t_start + len(new_txtr)) % 128:
             new_txtr.append(0)
-        ph = placeholder_png(i, w, h)
+        ph = placeholder_qoi(i, w, h)
         blob_ptr = t_start + len(new_txtr)
         new_txtr += ph
         rel = ptrs[i] - t_start
@@ -312,7 +323,7 @@ def main():
     for i, p in enumerate(ptrs):
         e = struct.unpack('<7I', chk[p:p + 28])
         if not keep_textures:
-            assert chk[e[6]:e[6] + 8] == b'\x89PNG\r\n\x1a\n', 'page %d placeholder check failed' % i
+            assert chk[e[6]:e[6] + 4] == b'fioq' and chk[e[6] + 37:e[6] + 45] == b'yyLdYYLP', 'page %d placeholder check failed' % i
         else:
             assert chk[e[6]:e[6] + 4] in (b'2zoq', b'fioq', b'\x89PNG'), 'page %d data check failed' % i
 

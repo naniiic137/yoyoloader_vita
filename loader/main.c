@@ -1340,6 +1340,12 @@ void LoadTextureFromPNG_5(uint32_t *texture, int has_mips) {
 uint32_t *(*ReadQOIFFile)(void *data, int size, int *w, int *h, int flag);
 void (*FreeQOIFFile)(void *data);
 int LoadTextureFromQOIF_hook(uint32_t *texture, int has_mips) {
+	// gm_textures.py QOI placeholders (real size in the header, marker at +37): load the .pvr
+	uint8_t *blob = (uint8_t *)texture[24];
+	if (blob && texture[25] >= 49 && !memcmp(blob + 37, "yyLdYYLP", 8)) {
+		LoadTextureFromPNG_generic(texture[24], texture[25], &texture[6], &texture[7], texture);
+		return texture[7];
+	}
 	int width, height;
 	uint32_t *data = ReadQOIFFile((void *)texture[24], texture[25], &width, &height, (texture[6] & 2) == 0);
 	if (!data) {
