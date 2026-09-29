@@ -32,6 +32,7 @@ import os
 import struct
 import sys
 import zipfile
+import zlib
 
 import numpy as np
 from PIL import Image
@@ -129,12 +130,60 @@ def convert_page(img, dxt5=False):
     return 0x101, np.ascontiguousarray(img).tobytes(), len(colours)
 
 
-def placeholder_png(i):
-    # 2x1 RGBA image the loader recognises: pixel 0 = 0xFFBEADDE, pixel 1 = texture index
-    px = struct.pack('<II', 0xFFBEADDE, 0xFF000000 | i)
-    buf = io.BytesIO()
-    Image.frombytes('RGBA', (2, 1), px).save(buf, 'PNG')
-    return buf.getvalue()
+def _png_chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+
+
+def placeholder_png(i, w, h):
+    # A PNG header with the page's real size (the runner reads it to compute sprite UVs)
+    # plus a private "yyLd" chunk holding the page index; the loader spots the chunk at
+    # offset 37 and loads assets/<i>.pvr instead of decoding the PNG
+    return (b'\x89PNG\r\n\x1a\n'
+            + _png_chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+            + _png_chunk(b'yyLd', b'YYLP' + struct.pack('<I', i))
+            + _png_chunk(b'IDAT', zlib.compress(b'\x00'))
+            + _png_chunk(b'IEND', b''))
+
+
+def compress_sfx(apk, sond_entries):
+    """Re-encodes embedded uncompressed WAV sounds (flags 0x65) as OGG Vorbis and marks
+    them compressed (0x66). Returns {audiogroup file: new bytes} and the patched entries."""
+    import soundfile as sf
+    by_group = {}
+    for entry_off, group, audio_id in sond_entries:
+        by_group.setdefault(group, []).append((entry_off, audio_id))
+    new_files, patched = {}, []
+    for group, items in sorted(by_group.items()):
+        name = 'assets/audiogroup%d.dat' % group
+        if group == 0 or name not in apk.namelist():
+            continue
+        a = apk.read(name)
+        if a[8:12] != b'AUDO':
+            continue
+        n = struct.unpack('<I', a[16:20])[0]
+        ptrs = struct.unpack('<%dI' % n, a[20:20 + 4 * n])
+        blobs = [a[p + 4:p + 4 + struct.unpack('<I', a[p:p + 4])[0]] for p in ptrs]
+        for entry_off, audio_id in items:
+            wav = blobs[audio_id]
+            if wav[:4] != b'RIFF':
+                continue
+            data, rate = sf.read(io.BytesIO(wav), dtype='int16', always_2d=True)
+            out = io.BytesIO()
+            sf.write(out, data, rate, format='OGG', subtype='VORBIS', compression_level=0.25)
+            blobs[audio_id] = out.getvalue()
+            patched.append(entry_off)
+        body = bytearray(struct.pack('<I', n) + b'\x00' * (4 * n))
+        base = 8 + 8  # FORM header + AUDO header
+        for k, b in enumerate(blobs):
+            while len(body) % 4:
+                body.append(0)
+            struct.pack_into('<I', body, 4 + 4 * k, base + len(body))
+            body += struct.pack('<I', len(b)) + b
+        while len(body) % 4:
+            body.append(0)
+        new_files[name] = b'FORM' + struct.pack('<I', len(body) + 8) + b'AUDO' + struct.pack('<I', len(body)) + bytes(body)
+        print('%s: %.1f MB -> %.1f MB' % (name, len(a) / 2**20, len(new_files[name]) / 2**20))
+    return new_files, patched
 
 
 def parse_chunks(d):
@@ -191,7 +240,7 @@ def main():
         # placeholder blob, 128-byte aligned like GameMaker does
         while (t_start + len(new_txtr)) % 128:
             new_txtr.append(0)
-        ph = placeholder_png(i)
+        ph = placeholder_png(i, w, h)
         blob_ptr = t_start + len(new_txtr)
         new_txtr += ph
         rel = ptrs[i] - t_start
@@ -216,6 +265,21 @@ def main():
                 struct.pack_into('<I', out, e + 4, 0x66)
                 patched += 1
         print('%d sounds switched from decompress-on-load to compressed' % patched)
+
+        # Uncompressed sound effects (flags 0x65, WAV) -> OGG Vorbis, marked compressed (0x66)
+        sfx = []
+        for k in range(n):
+            e = struct.unpack_from('<I', out, s_off + 12 + 4 * k)[0]
+            f = struct.unpack_from('<11I', out, e)
+            if f[1] == 0x65:
+                sfx.append((e, f[7], f[8]))
+        with zipfile.ZipFile(apk_path) as z:
+            new_audio, done = compress_sfx(z, sfx)
+        for e in done:
+            struct.pack_into('<I', out, e + 4, 0x66)
+        print('%d sound effects compressed to OGG' % len(done))
+    else:
+        new_audio = {}
     out += b'TXTR' + struct.pack('<I', len(new_txtr)) + new_txtr
     delta = (t_off + 8 + len(new_txtr)) - (t_off + 8 + t_size)
     for name, off, size in chunks[ti + 1:]:
@@ -239,7 +303,9 @@ def main():
     new_apk = os.path.join(out_dir, 'game.apk')
     with zipfile.ZipFile(apk_path) as src, zipfile.ZipFile(new_apk, 'w') as dst:
         for info in src.infolist():
-            if info.filename == 'assets/game.droid':
+            if info.filename in new_audio:
+                dst.writestr(info, new_audio[info.filename])
+            elif info.filename == 'assets/game.droid':
                 zi = zipfile.ZipInfo('assets/game.droid', info.date_time)
                 zi.compress_type = zipfile.ZIP_STORED
                 dst.writestr(zi, chk)

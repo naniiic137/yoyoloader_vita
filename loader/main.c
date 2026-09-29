@@ -1122,7 +1122,24 @@ static void upload_rgba_texture(int width, int height, uint32_t *data) {
 
 void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, uint32_t *tex_id, uint32_t *texture) {
 	int width, height;
-	uint32_t *data = ReadPNGFile(arg1 , arg2, &width, &height, (*flags & 2) == 0);
+	uint32_t *data;
+	// tools/gm_textures.py placeholders are PNGs whose IHDR has the real page size (so the
+	// runner computes sprite UVs right) plus a private "yyLd" chunk with the page index.
+	// They're never decoded: the page comes straight from <data>/assets/<idx>.pvr.
+	static uint32_t page_placeholder[2];
+	uint8_t *blob = (uint8_t *)arg1;
+	int is_page = blob && arg2 >= 49 && !memcmp(blob + 37, "yyLdYYLP", 8);
+	if (is_page) {
+		uint32_t idx;
+		sceClibMemcpy(&idx, blob + 45, 4);
+		page_placeholder[0] = 0xFFBEADDE;
+		page_placeholder[1] = 0xFF000000 | idx;
+		data = page_placeholder;
+		width = 2;
+		height = 1;
+	} else {
+		data = ReadPNGFile(arg1 , arg2, &width, &height, (*flags & 2) == 0);
+	}
 	if (data) {
 		InvalidateTextureState();
 		glGenTextures(1, tex_id);
@@ -1302,7 +1319,8 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 			upload_rgba_texture(width, height, data);
 		}
 		*flags = *flags | 0x40;
-		FreePNGFile();
+		if (!is_page)
+			FreePNGFile();
 		texture[0] = 0x06;
 		if (flags != &texture[2]) {
 			texture[1] = width;
