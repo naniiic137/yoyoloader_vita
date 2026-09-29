@@ -19,7 +19,9 @@ in the new APK so the loader doesn't have to inflate it at boot.
 
 Usage:
   pip install numpy numba pillow
-  python gm_textures.py game.apk out_dir
+  python gm_textures.py game.apk out_dir [--dxt5]
+
+--dxt5 writes every page as DXT5 (4MB like P8, but lossy) instead.
 
 Then copy out_dir/game.apk and out_dir/assets/ to ux0:data/gms/<game id>/.
 Only use this on games you own.
@@ -113,8 +115,11 @@ def write_pvr(path, w, h, fmt, payload):
         f.write(payload)
 
 
-def convert_page(img):
-    """Returns (format, payload): 0x100 = P8, 0x101 = RGBA8."""
+def convert_page(img, dxt5=False):
+    """Returns (format, payload): 0x100 = P8, 0x101 = RGBA8, 0x0B = DXT5 (lossy, --dxt5)."""
+    if dxt5:
+        import etcpak
+        return 0x0B, etcpak.compress_bc3(np.ascontiguousarray(img).tobytes(), img.shape[1], img.shape[0]), 0
     px = np.ascontiguousarray(img).reshape(-1, 4).view(np.uint32).ravel()
     colours, idx = np.unique(px, return_inverse=True)
     if len(colours) <= 256:
@@ -145,10 +150,12 @@ def parse_chunks(d):
 
 
 def main():
-    if len(sys.argv) != 3:
+    dxt5 = '--dxt5' in sys.argv
+    args = [a for a in sys.argv[1:] if a != '--dxt5']
+    if len(args) != 2:
         print(__doc__)
         sys.exit(1)
-    apk_path, out_dir = sys.argv[1], sys.argv[2]
+    apk_path, out_dir = args
     assets_dir = os.path.join(out_dir, 'assets')
     os.makedirs(assets_dir, exist_ok=True)
 
@@ -173,13 +180,13 @@ def main():
     for i, e in enumerate(entries):
         blob = d[e[6]:e[6] + e[2]]
         w, h, img = decode_page(blob)
-        fmt, payload, ncol = convert_page(img)
+        fmt, payload, ncol = convert_page(img, dxt5)
         write_pvr(os.path.join(assets_dir, '%d.pvr' % i), w, h, fmt, payload)
         if fmt == 0x100:
             total_p8 += 1
         else:
             total_rgba += 1
-        print('page %2d: %4dx%-4d %4d colours -> %s' % (i, w, h, ncol, 'P8' if fmt == 0x100 else 'RGBA'))
+        print('page %2d: %4dx%-4d -> %s' % (i, w, h, {0x100: 'P8', 0x101: 'RGBA', 0x0B: 'DXT5'}[fmt]))
 
         # placeholder blob, 128-byte aligned like GameMaker does
         while (t_start + len(new_txtr)) % 128:
