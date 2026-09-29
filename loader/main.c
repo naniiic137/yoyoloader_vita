@@ -928,6 +928,10 @@ void main_loop() {
 				glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 				glUseProgram(prog);
 			}
+			// Wait for the GPU to finish this frame before starting the next one. UFO 50 (GMS
+			// 2024) drew correctly only when frames were slow, which points to data being reused
+			// while the GPU still reads it.
+			glFinish();
 			if (ime_active) {
 				char *r = get_ime_dialog_result();
 				if (r) {
