@@ -870,8 +870,7 @@ void main_loop() {
 		tex_lru_frame++;
 		if (debugMode && tex_lru_frame % 300 == 0) {
 			extern unsigned newlib_heap_used(void);
-			debugPrintf("[MEM] newlib peak %u KB / %u KB | vitaGL free: RAM %u KB, VRAM %u KB, PHYCONT %u KB, total %u KB | pages %u KB in %d
-",
+			debugPrintf("[MEM] newlib peak %u KB / %u KB | vitaGL free: RAM %u KB, VRAM %u KB, PHYCONT %u KB, total %u KB | pages %u KB in %d\n",
 				newlib_heap_used() / 1024, _newlib_heap_size / 1024, vglMemFree(VGL_MEM_RAM) / 1024, vglMemFree(VGL_MEM_VRAM) / 1024,
 				vglMemFree(VGL_MEM_PHYCONT) / 1024, vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 		}
