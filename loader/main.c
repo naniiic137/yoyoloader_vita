@@ -945,6 +945,57 @@ uint32_t *(*ReadPNGFile) (void *a1, int a2, int *a3, int *a4, int a5);
 void (*FreePNGFile) ();
 void (*InvalidateTextureState) ();
 
+// Pixel-art games ship huge RGBA texture pages that rarely use more than 256 colours
+// (e.g. UFO 50: 58 pages of 2048x2048, ~936MB as RGBA). Uploading those as P8
+// paletted textures uses a quarter of the memory and is lossless.
+static void upload_rgba_texture(int width, int height, uint32_t *data) {
+	if (width * height >= 256 * 256) {
+		uint32_t keys[1024];
+		uint8_t vals[1024];
+		uint8_t used[1024];
+		uint32_t palette[256];
+		int num_colors = 0;
+		sceClibMemset(used, 0, sizeof(used));
+
+		uint8_t *pal_data = vglMalloc(256 * 4 + width * height);
+		if (pal_data) {
+			uint8_t *idx = pal_data + 256 * 4;
+			uint32_t last = data[0] + 1;
+			uint8_t last_idx = 0;
+			int i, n = width * height;
+			for (i = 0; i < n; i++) {
+				uint32_t clr = data[i];
+				if (clr != last) {
+					uint32_t h = (clr * 2654435761u) >> 22;
+					while (used[h] && keys[h] != clr)
+						h = (h + 1) & 1023;
+					if (!used[h]) {
+						if (num_colors == 256)
+							break;
+						used[h] = 1;
+						keys[h] = clr;
+						vals[h] = num_colors;
+						palette[num_colors++] = clr;
+					}
+					last = clr;
+					last_idx = vals[h];
+				}
+				idx[i] = last_idx;
+			}
+			if (i == n) {
+				sceClibMemset(palette + num_colors, 0, (256 - num_colors) * 4);
+				sceClibMemcpy(pal_data, palette, 256 * 4);
+				glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, 256 * 4 + n, pal_data);
+				vglFree(pal_data);
+				debugPrintf("Uploaded %dx%d texture as P8 (%d colors)\n", width, height, num_colors);
+				return;
+			}
+			vglFree(pal_data);
+		}
+	}
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+}
+
 void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, uint32_t *tex_id, uint32_t *texture) {
 	int width, height;
 	uint32_t *data = ReadPNGFile(arg1 , arg2, &width, &height, (*flags & 2) == 0);
@@ -1033,14 +1084,14 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 					sprintf(fname, "%s%u.png", data_path, idx);
 #endif
 					ext_data = stbi_load(fname, &width, &height, NULL, 4);
-					glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, ext_data);
+					upload_rgba_texture(width, height, ext_data);
 				}
 				vglFree(ext_data);
 			} else {
-				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+				upload_rgba_texture(width, height, data);
 			}
 		} else {
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+			upload_rgba_texture(width, height, data);
 		}
 		*flags = *flags | 0x40;
 		FreePNGFile();
