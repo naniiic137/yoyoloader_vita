@@ -63,21 +63,23 @@ def _qoi_decode(data, w, h):
             elif (b1 & 0xe0) == 0x60:
                 b2 = data[pos]; pos += 1
                 run = (((b1 & 0x1f) << 8) | b2) + 32
+            # Diffs are two's-complement signed fields ((v ^ m) - m sign-extends) (as in GameMaker's ReadQOIFFile),
+            # not the biased values of the published QOI spec
             elif (b1 & 0xc0) == 0x80:
-                r += ((b1 >> 4) & 3) - 2
-                g += ((b1 >> 2) & 3) - 2
-                b += (b1 & 3) - 2
+                r += ((((b1 >> 4) & 3) ^ 2) - 2)
+                g += ((((b1 >> 2) & 3) ^ 2) - 2)
+                b += (((b1 & 3) ^ 2) - 2)
             elif (b1 & 0xe0) == 0xc0:
                 b2 = data[pos]; pos += 1
-                r += (b1 & 0x1f) - 16
-                g += (b2 >> 4) - 8
-                b += (b2 & 15) - 8
+                r += (((b1 & 0x1f) ^ 16) - 16)
+                g += (((b2 >> 4) ^ 8) - 8)
+                b += (((b2 & 15) ^ 8) - 8)
             elif (b1 & 0xf0) == 0xe0:
                 b2 = data[pos]; b3 = data[pos + 1]; pos += 2
-                r += (((b1 & 15) << 1) | (b2 >> 7)) - 16
-                g += ((b2 & 0x7c) >> 2) - 16
-                b += (((b2 & 3) << 3) | (b3 >> 5)) - 16
-                a += (b3 & 31) - 16
+                r += (((((b1 & 15) << 1) | (b2 >> 7)) ^ 16) - 16)
+                g += ((((b2 >> 2) & 0x1f) ^ 16) - 16)
+                b += (((((b2 & 3) << 3) | (b3 >> 5)) ^ 16) - 16)
+                a += (((b3 & 31) ^ 16) - 16)
             else:
                 if b1 & 8:
                     r = data[pos]; pos += 1
