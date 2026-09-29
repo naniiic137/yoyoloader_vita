@@ -1171,29 +1171,21 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 						debugPrintf("Loading page %s (%ux%u %s) [vitaGL free %u KB, pages %u KB in %d]\n", fname, width, height, format == 0x100 ? "P8" : (format == 0x0B ? "DXT5" : "RGBA"), vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 						if (tex_lru_make_room(texture, size))
 							glBindTexture(GL_TEXTURE_2D, *tex_id);
-						void *pal = NULL, *px = NULL;
+						// Read into a temporary buffer and let vitaGL copy it (the same upload path
+						// the runner-decoded pages use)
 						int ok = 0;
-						if (format == 0x0B) {
-							// DXT5 (gm_textures.py --dxt5): vitaGL swizzles it, so it needs a linear copy first
-							void *tmp = vglMalloc(size);
-							if (tmp && sceIoRead(pfd, tmp, size) == size) {
+						void *tmp = vglMalloc(size);
+						if (tmp && sceIoRead(pfd, tmp, size) == size) {
+							if (format == 0x0B)
 								glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, width, height, 0, size, tmp);
-								ok = vglGetTexDataPointer(GL_TEXTURE_2D) != NULL;
-							}
-							if (tmp)
-								vglFree(tmp);
-						} else {
-						if (format == 0x100) {
-							glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, size, NULL);
-							SceGxmTexture *gxm_tex = vglGetGxmTexture(GL_TEXTURE_2D);
-							pal = gxm_tex ? sceGxmTextureGetPalette(gxm_tex) : NULL;
-						} else {
-							glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+							else if (format == 0x100)
+								glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, size, tmp);
+							else
+								glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+							ok = vglGetTexDataPointer(GL_TEXTURE_2D) != NULL;
 						}
-						px = vglGetTexDataPointer(GL_TEXTURE_2D);
-						uint32_t px_size = format == 0x100 ? size - 256 * 4 : size;
-						ok = px && (format == 0x101 || pal) && (!pal || sceIoRead(pfd, pal, 256 * 4) == 256 * 4) && sceIoRead(pfd, px, px_size) == px_size;
-						}
+						if (tmp)
+							vglFree(tmp);
 						if (ok) {
 							tex_lru_add(texture, size);
 						} else {

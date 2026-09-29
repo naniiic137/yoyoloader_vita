@@ -55,12 +55,16 @@ def _qoi_decode(data, w, h):
             run -= 1
         elif pos < n:
             b1 = data[pos]; pos += 1
+            upd = True  # like the runner, only diff/colour ops write the colour index
             if (b1 & 0xc0) == 0x00:
+                upd = False
                 i = (b1 & 0x3f) * 4
                 r = index[i]; g = index[i + 1]; b = index[i + 2]; a = index[i + 3]
             elif (b1 & 0xe0) == 0x40:
+                upd = False
                 run = b1 & 0x1f
             elif (b1 & 0xe0) == 0x60:
+                upd = False
                 b2 = data[pos]; pos += 1
                 run = (((b1 & 0x1f) << 8) | b2) + 32
             # Diffs are two's-complement signed fields ((v ^ m) - m sign-extends) (as in GameMaker's ReadQOIFFile),
@@ -90,8 +94,9 @@ def _qoi_decode(data, w, h):
                 if b1 & 1:
                     a = data[pos]; pos += 1
             r &= 255; g &= 255; b &= 255; a &= 255
-            i = ((r ^ g ^ b ^ a) & 63) * 4
-            index[i] = r; index[i + 1] = g; index[i + 2] = b; index[i + 3] = a
+            if upd:
+                i = ((r ^ g ^ b ^ a) & 63) * 4
+                index[i] = r; index[i + 1] = g; index[i + 2] = b; index[i + 3] = a
         out[p * 4] = r; out[p * 4 + 1] = g; out[p * 4 + 2] = b; out[p * 4 + 3] = a
     return out
 
