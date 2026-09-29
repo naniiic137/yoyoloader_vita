@@ -537,6 +537,125 @@ int pthread_mutex_unlock_soloader(pthread_mutex_t **mutex)
 	return pthread_mutex_unlock(*mutex);
 }
 
+/* pthread_rwlock_* for GameMaker 2024 runtimes (issue #160: "Unknown symbol
+ * pthread_rwlock_init"). Bionic's pthread_rwlock_t is an opaque block that
+ * starts zeroed (PTHREAD_RWLOCK_INITIALIZER); we keep a pointer to our own
+ * lock in its first word and create it lazily, like the mutex shims above.
+ * Reader-preferring, built on a mutex and a condition variable. */
+typedef struct {
+	pthread_mutex_t m;
+	pthread_cond_t c;
+	int readers;
+	int writer;
+} so_rwlock_t;
+
+static pthread_mutex_t so_rwlock_init_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static so_rwlock_t *so_rwlock_get(void **rw)
+{
+	if (!*rw) {
+		pthread_mutex_lock(&so_rwlock_init_lock);
+		if (!*rw) {
+			so_rwlock_t *l = vglCalloc(1, sizeof(so_rwlock_t));
+			pthread_mutex_init(&l->m, NULL);
+			pthread_cond_init(&l->c, NULL);
+			*rw = l;
+		}
+		pthread_mutex_unlock(&so_rwlock_init_lock);
+	}
+	return (so_rwlock_t *)*rw;
+}
+
+int pthread_rwlock_init_soloader(void **rw, const void *attr)
+{
+	*rw = NULL;
+	so_rwlock_get(rw);
+	return 0;
+}
+
+int pthread_rwlock_destroy_soloader(void **rw)
+{
+	so_rwlock_t *l = (so_rwlock_t *)*rw;
+	if (l) {
+		pthread_cond_destroy(&l->c);
+		pthread_mutex_destroy(&l->m);
+		vglFree(l);
+		*rw = NULL;
+	}
+	return 0;
+}
+
+int pthread_rwlock_rdlock_soloader(void **rw)
+{
+	so_rwlock_t *l = so_rwlock_get(rw);
+	pthread_mutex_lock(&l->m);
+	while (l->writer)
+		pthread_cond_wait(&l->c, &l->m);
+	l->readers++;
+	pthread_mutex_unlock(&l->m);
+	return 0;
+}
+
+int pthread_rwlock_tryrdlock_soloader(void **rw)
+{
+	so_rwlock_t *l = so_rwlock_get(rw);
+	int ret = 0;
+	pthread_mutex_lock(&l->m);
+	if (l->writer)
+		ret = EBUSY;
+	else
+		l->readers++;
+	pthread_mutex_unlock(&l->m);
+	return ret;
+}
+
+int pthread_rwlock_wrlock_soloader(void **rw)
+{
+	so_rwlock_t *l = so_rwlock_get(rw);
+	pthread_mutex_lock(&l->m);
+	while (l->writer || l->readers)
+		pthread_cond_wait(&l->c, &l->m);
+	l->writer = 1;
+	pthread_mutex_unlock(&l->m);
+	return 0;
+}
+
+int pthread_rwlock_trywrlock_soloader(void **rw)
+{
+	so_rwlock_t *l = so_rwlock_get(rw);
+	int ret = 0;
+	pthread_mutex_lock(&l->m);
+	if (l->writer || l->readers)
+		ret = EBUSY;
+	else
+		l->writer = 1;
+	pthread_mutex_unlock(&l->m);
+	return ret;
+}
+
+int pthread_rwlock_timedrdlock_soloader(void **rw, const void *abstime)
+{
+	return pthread_rwlock_rdlock_soloader(rw);
+}
+
+int pthread_rwlock_timedwrlock_soloader(void **rw, const void *abstime)
+{
+	return pthread_rwlock_wrlock_soloader(rw);
+}
+
+int pthread_rwlock_unlock_soloader(void **rw)
+{
+	so_rwlock_t *l = so_rwlock_get(rw);
+	pthread_mutex_lock(&l->m);
+	if (l->writer)
+		l->writer = 0;
+	else if (l->readers > 0)
+		l->readers--;
+	pthread_cond_broadcast(&l->c);
+	pthread_mutex_unlock(&l->m);
+	return 0;
+}
+
 int pthread_join_soloader(const pthread_t *thread, void **value_ptr)
 {
 	return pthread_join(*thread, value_ptr);
@@ -1979,6 +2098,19 @@ static so_default_dynlib default_dynlib[] = {
 	{ "pthread_join", (uintptr_t)&pthread_join_soloader },
 	{ "pthread_key_create", (uintptr_t)&pthread_key_create },
 	{ "pthread_key_delete", (uintptr_t)&pthread_key_delete },
+	{ "pthread_rwlock_init", (uintptr_t) &pthread_rwlock_init_soloader },
+	{ "pthread_rwlock_destroy", (uintptr_t) &pthread_rwlock_destroy_soloader },
+	{ "pthread_rwlock_rdlock", (uintptr_t) &pthread_rwlock_rdlock_soloader },
+	{ "pthread_rwlock_tryrdlock", (uintptr_t) &pthread_rwlock_tryrdlock_soloader },
+	{ "pthread_rwlock_timedrdlock", (uintptr_t) &pthread_rwlock_timedrdlock_soloader },
+	{ "pthread_rwlock_wrlock", (uintptr_t) &pthread_rwlock_wrlock_soloader },
+	{ "pthread_rwlock_trywrlock", (uintptr_t) &pthread_rwlock_trywrlock_soloader },
+	{ "pthread_rwlock_timedwrlock", (uintptr_t) &pthread_rwlock_timedwrlock_soloader },
+	{ "pthread_rwlock_unlock", (uintptr_t) &pthread_rwlock_unlock_soloader },
+	{ "pthread_rwlockattr_init", (uintptr_t) &ret0 },
+	{ "pthread_rwlockattr_destroy", (uintptr_t) &ret0 },
+	{ "pthread_rwlockattr_setpshared", (uintptr_t) &ret0 },
+	{ "pthread_rwlockattr_setkind_np", (uintptr_t) &ret0 },
 	{ "pthread_mutex_destroy", (uintptr_t) &pthread_mutex_destroy_soloader },
 	{ "pthread_mutex_init", (uintptr_t) &pthread_mutex_init_soloader },
 	{ "pthread_mutex_lock", (uintptr_t) &pthread_mutex_lock_soloader },

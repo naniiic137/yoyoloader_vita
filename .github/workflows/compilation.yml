@@ -4,6 +4,9 @@ on:
   repository_dispatch:
     types: [run_build]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -79,6 +82,11 @@ jobs:
         cp ../livearea/default_gate.png builder/assets/startup.png
         zip -9 -r builder.zip builder
 
+    - uses: actions/upload-artifact@v4
+      with:
+        name: YoYoLoader-vpk
+        path: build/YoYoLoader.vpk
+
     - uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -101,6 +109,7 @@ jobs:
         tag: Nightly
 
     - name: Publish Nightly to VitaDB
+      if: github.repository == 'Rinnegatamante/yoyoloader_vita'
       run: |
         curl --fail-with-body --show-error \
           -X POST \
@@ -109,7 +118,7 @@ jobs:
           https://www.rinnegatamante.eu/vitadb/publish_nightly.php
 
     - name: Restart workflow if an upload fails
-      if: ${{ failure() }}
+      if: ${{ failure() && github.repository == 'Rinnegatamante/yoyoloader_vita' }}
       uses: peter-evans/repository-dispatch@v2
       with:
         token: ${{ secrets.REPO_ACCESS_TOKEN }}
