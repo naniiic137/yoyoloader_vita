@@ -9,7 +9,7 @@
 #define LOAD_ADDRESS 0x98000000
 #endif
 
-#define MEMORY_VITAGL_THRESHOLD_MB 12
+#define MEMORY_VITAGL_THRESHOLD_MB 32 // RAM vitaGL leaves free; thread stacks (512KB each) come from here
 
 #define DATA_PATH "ux0:data/gms"
 #define GLSL_PATH DATA_PATH "/shared/glsl"

@@ -469,15 +469,19 @@ int pthread_create_soloader(pthread_t **thread,
 {
 	*thread = vglCalloc(1, sizeof(pthread_t));
 
+	int ret;
 	if (attr != NULL) {
 		pthread_attr_setstacksize(*attr, 512 * 1024);
-		return pthread_create(*thread, *attr, start, param);
+		ret = pthread_create(*thread, *attr, start, param);
 	} else {
 		pthread_attr_t attrr;
 		pthread_attr_init(&attrr);
 		pthread_attr_setstacksize(&attrr, 512 * 1024);
-		return pthread_create(*thread, &attrr, start, param);
+		ret = pthread_create(*thread, &attrr, start, param);
 	}
+	if (ret) // e.g. no RAM left for the stack; runners often ignore this and wait forever
+		debugPrintf("pthread_create failed (%d) for %p\n", ret, start);
+	return ret;
 
 }
 
