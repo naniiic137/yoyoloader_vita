@@ -868,10 +868,20 @@ void main_loop() {
 		}
 
 		tex_lru_frame++;
+		if (debugMode) {
+			// L + R + START: crash on purpose so the Vita writes a core dump with every thread's state
+			SceCtrlData dbg_pad;
+			sceCtrlPeekBufferPositive(0, &dbg_pad, 1);
+			if ((dbg_pad.buttons & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_START)) == (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER | SCE_CTRL_START)) {
+				debugPrintf("Debug dump requested\n");
+				*(volatile int *)0 = 0;
+			}
+		}
 		if (debugMode && tex_lru_frame % 300 == 0) {
 			extern unsigned newlib_heap_used(void);
-			debugPrintf("[MEM] newlib peak %u KB / %u KB | vitaGL free: RAM %u KB, VRAM %u KB, PHYCONT %u KB, total %u KB | pages %u KB in %d\n",
-				newlib_heap_used() / 1024, _newlib_heap_size / 1024, vglMemFree(VGL_MEM_RAM) / 1024, vglMemFree(VGL_MEM_VRAM) / 1024,
+			struct mallinfo mi = mallinfo();
+			debugPrintf("[MEM] newlib in use %u KB, peak %u KB / %u KB | vitaGL free: RAM %u KB, VRAM %u KB, PHYCONT %u KB, total %u KB | pages %u KB in %d\n",
+				(unsigned)mi.uordblks / 1024, newlib_heap_used() / 1024, _newlib_heap_size / 1024, vglMemFree(VGL_MEM_RAM) / 1024, vglMemFree(VGL_MEM_VRAM) / 1024,
 				vglMemFree(VGL_MEM_PHYCONT) / 1024, vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 		}
 		if (!is_portrait)
@@ -1915,6 +1925,17 @@ void __assert2(const char *file, int line, const char *func, const char *expr) {
 }
 
 // libc imports newer runners (GMS 2024.x) pull in
+// Existing dirs must fail with EEXIST: the runner creates save paths one level at a time
+// and gives up on any other error (newlib reported ENOMEM for "ux0:data")
+int mkdir_hook(const char *path, mode_t mode) {
+	struct stat st;
+	if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+		errno = EEXIST;
+		return -1;
+	}
+	return mkdir(path, mode);
+}
+
 char *__strncpy_chk(char *dst, const char *src, size_t n, size_t dst_len) {
 	return strncpy(dst, src, n);
 }
@@ -2357,7 +2378,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "memcpy", (uintptr_t)&sceClibMemcpy },
 	{ "memmove", (uintptr_t)&sceClibMemmove },
 	{ "memset", (uintptr_t)&sceClibMemset },
-	{ "mkdir", (uintptr_t)&mkdir },
+	{ "mkdir", (uintptr_t)&mkdir_hook },
 	{ "mktime", (uintptr_t)&mktime },
 	{ "mktime64", (uintptr_t)&mktime64 },
 	{ "mmap", (uintptr_t)&mmap },
