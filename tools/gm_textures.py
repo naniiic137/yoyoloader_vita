@@ -10,6 +10,9 @@ as an externalized .pvr the loader reads directly:
   * pages with <= 256 colours -> P8 (palette + 1 byte/pixel, lossless, 4MB)
   * other pages               -> raw RGBA8
 
+Sounds set to "decompress on load" are switched to "compressed" so the
+music stays as OGG in memory instead of raw PCM.
+
 game.droid gets a tiny 2x1 placeholder PNG in place of each page (the same
 scheme the selector's "Externalize" feature uses), and is stored uncompressed
 in the new APK so the loader doesn't have to inflate it at boot.
@@ -191,6 +194,21 @@ def main():
         new_txtr.append(0)
 
     out = bytearray(d[:t_off])
+
+    # Music marked "decompress on load" (flags 0x67) gets unpacked to raw PCM when its
+    # audio group loads (~10x its OGG size; UFO 50's menu music alone is ~62MB).
+    # Switch it to "compressed" (0x66): the OGG stays in memory and is decoded as it plays.
+    if 'SOND' in names:
+        _, s_off, _ = chunks[names.index('SOND')]
+        assert s_off < t_off
+        n = struct.unpack('<I', out[s_off + 8:s_off + 12])[0]
+        patched = 0
+        for k in range(n):
+            e = struct.unpack_from('<I', out, s_off + 12 + 4 * k)[0]
+            if struct.unpack_from('<I', out, e + 4)[0] == 0x67:
+                struct.pack_into('<I', out, e + 4, 0x66)
+                patched += 1
+        print('%d sounds switched from decompress-on-load to compressed' % patched)
     out += b'TXTR' + struct.pack('<I', len(new_txtr)) + new_txtr
     delta = (t_off + 8 + len(new_txtr)) - (t_off + 8 + t_size)
     for name, off, size in chunks[ti + 1:]:

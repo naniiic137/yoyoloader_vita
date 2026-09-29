@@ -958,9 +958,9 @@ uint32_t *(*ReadPNGFile) (void *a1, int a2, int *a3, int *a4, int a5);
  * runner's own Graphics::FlushTexture (GL texture deleted, id set to -1), and
  * the runner reloads them from their placeholder the next time they're bound.
  * Recency comes from Graphics::SetTexture, whose PLT slot we redirect. */
-#define TEX_LRU_BUDGET (112 * 1024 * 1024)
+#define TEX_LRU_BUDGET (200 * 1024 * 1024) // upper bound; low free memory triggers eviction first
 #define TEX_LRU_MAX 512
-#define TEX_LRU_MARGIN (8 * 1024 * 1024) // free memory to keep for everything else
+#define TEX_LRU_MARGIN (16 * 1024 * 1024) // free memory to keep for everything else
 typedef struct {
 	uint32_t *tex;
 	uint32_t gl_id;

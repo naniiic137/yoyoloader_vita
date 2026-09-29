@@ -61,6 +61,9 @@ void _init_vita_heap(void)
 		sceClibSnprintf(t, 0x200, "%s", "AM2R");
 	}
 	sceClibSnprintf(&t[0x1000], 0x6000, "%s/%s/yyl.cfg", DATA_PATH, t);
+	// ux0:data/gms/<game>/newlib.txt: heap size in MB (the selector rewrites yyl.cfg on every launch)
+	char mem_path[256];
+	sceClibSnprintf(mem_path, sizeof(mem_path), "%s/%s/newlib.txt", DATA_PATH, t);
 	fd = sceIoOpen(&t[0x1000], SCE_O_RDONLY, 0777);
 #endif
 	if (fd > 0)
@@ -74,20 +77,25 @@ void _init_vita_heap(void)
 		} else {
 			_newlib_heap_size = 240 * 1024 * 1024;
 		}
-		// newlibMB=<n> overrides the heap size; whatever it doesn't take goes to vitaGL
-		s = sceClibStrstr(t, "newlibMB=");
-		if (s) {
-			unsigned mb = 0;
-			for (s += 9; *s >= '0' && *s <= '9'; s++)
-				mb = mb * 10 + (*s - '0');
-			if (mb >= 64 && mb <= 400)
-				_newlib_heap_size = mb * 1024 * 1024;
-		}
 	}
 	else
 	{
 		_newlib_heap_size = 240 * 1024 * 1024;
 	}
+#ifndef STANDALONE_MODE
+	// Whatever the newlib heap doesn't take is left to vitaGL (textures)
+	fd = sceIoOpen(mem_path, SCE_O_RDONLY, 0777);
+	if (fd > 0) {
+		char num[16];
+		int n = sceIoRead(fd, num, sizeof(num) - 1);
+		sceIoClose(fd);
+		unsigned mb = 0;
+		for (int i = 0; i < n && num[i] >= '0' && num[i] <= '9'; i++)
+			mb = mb * 10 + (num[i] - '0');
+		if (mb >= 64 && mb <= 400)
+			_newlib_heap_size = mb * 1024 * 1024;
+	}
+#endif
 #endif
 	_newlib_heap_memblock = sceKernelAllocMemBlock("Newlib heap", 0x0c20d060, _newlib_heap_size, 0);
 	if (_newlib_heap_memblock < 0)

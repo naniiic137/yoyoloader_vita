@@ -4,3 +4,5 @@ standalone/*
 *.elf
 *.velf
 *.bin
+__pycache__/
+logs for vita/
