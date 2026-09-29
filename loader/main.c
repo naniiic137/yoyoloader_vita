@@ -1141,7 +1141,36 @@ void SetWorkingDirectory() {
 		*g_pWorkingDirectory = strdup("assets/");
 }
 
+// Some data files (e.g. GMS 2024.8 builds) store shader entries at offsets that
+// aren't 4-byte aligned. Shader_Load reads them with LDMIB, which faults on Vita
+// (Android kernels silently fix unaligned LDM up). Swap that block for plain LDRs.
+static const uint32_t shader_load_ldm[21] = {
+	0xE590601C, 0xE590A014, 0xE3560000, 0xE590400C, 0x10866007, 0xE35A0000, 0xE9900006,
+	0x108AA007, 0xE3540000, 0x10844007, 0xE58D2028, 0xE5902010, 0xE3510000, 0xE58D2024,
+	0x10811007, 0xE5902018, 0xE5900020, 0xE58D2020, 0xE58D001C, 0xE58D102C, 0xEA000019
+};
+static const uint32_t shader_load_ldr[21] = {
+	0xE590601C, 0xE3560000, 0x10866007, 0xE590A014, 0xE35A0000, 0x108AA007, 0xE590400C,
+	0xE3540000, 0x10844007, 0xE5901020, 0xE5902018, 0xE590C010, 0xE590E008, 0xE5900004,
+	0xE3500000, 0x10800007, 0xE58D002C, 0xE28D001C, 0xE8805006, 0xEA00001A, 0xE320F000
+};
+
+void patch_shader_load_alignment(void) {
+	uint32_t *func = (uint32_t *)so_symbol(&yoyoloader_mod, "_Z11Shader_LoadPhjS_");
+	if (!func || ((uintptr_t)func & 1))
+		return;
+	for (int i = 0; i < 0x200; i++) {
+		if (!memcmp(&func[i], shader_load_ldm, sizeof(shader_load_ldm))) {
+			debugPrintf("Patching Shader_Load unaligned LDM at 0x%08X\n", (uintptr_t)&func[i]);
+			kuKernelCpuUnrestrictedMemcpy(&func[i], shader_load_ldr, sizeof(shader_load_ldr));
+			return;
+		}
+	}
+}
+
 void patch_runner(void) {
+	patch_shader_load_alignment();
+
 	FreePNGFile = so_symbol(&yoyoloader_mod, "_Z11FreePNGFilev");
 	ReadPNGFile = so_symbol(&yoyoloader_mod, "_Z11ReadPNGFilePviPiS0_b");
 	InvalidateTextureState = so_symbol(&yoyoloader_mod, "_Z23_InvalidateTextureStatev");
@@ -1681,7 +1710,74 @@ void __assert2(const char *file, int line, const char *func, const char *expr) {
 	debugPrintf("assertion failed:\n%s:%d (%s): %s\n", file, line, func, expr);
 }
 
+// libc imports newer runners (GMS 2024.x) pull in
+char *__strncpy_chk(char *dst, const char *src, size_t n, size_t dst_len) {
+	return strncpy(dst, src, n);
+}
+
+char *__strncpy_chk2(char *dst, const char *src, size_t n, size_t dst_len, size_t src_len) {
+	return strncpy(dst, src, n);
+}
+
+int __open_2(const char *path, int flags) {
+	return open(path, flags);
+}
+
+ssize_t __read_chk(int fd, void *buf, size_t count, size_t buf_size) {
+	return read(fd, buf, count);
+}
+
+int fileno_hook(FILE *f) {
+	return fileno(f);
+}
+
+int getpagesize_hook(void) {
+	return 4096;
+}
+
+void _exit_hook(int status) {
+	sceKernelExitProcess(status);
+}
+
 static so_default_dynlib default_dynlib[] = {
+	{ "__strncpy_chk", (uintptr_t)&__strncpy_chk },
+	{ "__strncpy_chk2", (uintptr_t)&__strncpy_chk2 },
+	{ "__open_2", (uintptr_t)&__open_2 },
+	{ "__read_chk", (uintptr_t)&__read_chk },
+	{ "_exit", (uintptr_t)&_exit_hook },
+	{ "android_set_abort_message", (uintptr_t)&ret0 },
+	{ "asprintf", (uintptr_t)&asprintf },
+	{ "atof", (uintptr_t)&atof },
+	{ "cbrt", (uintptr_t)&cbrt },
+	{ "closedir", (uintptr_t)&closedir },
+	{ "closelog", (uintptr_t)&ret0 },
+	{ "dl_iterate_phdr", (uintptr_t)&ret0 },
+	{ "dl_unwind_find_exidx", (uintptr_t)&ret0 },
+	{ "exp2", (uintptr_t)&exp2 },
+	{ "fileno", (uintptr_t)&fileno_hook },
+	{ "getpagesize", (uintptr_t)&getpagesize_hook },
+	{ "getpgid", (uintptr_t)&ret0 },
+	{ "getppid", (uintptr_t)&ret0 },
+	{ "getpriority", (uintptr_t)&ret0 },
+	{ "getuid", (uintptr_t)&ret0 },
+	{ "gmtime", (uintptr_t)&gmtime },
+	{ "gmtime_r", (uintptr_t)&gmtime_r },
+	{ "localtime", (uintptr_t)&localtime },
+	{ "mkstemp", (uintptr_t)&mkstemp },
+	{ "opendir", (uintptr_t)&opendir },
+	{ "openlog", (uintptr_t)&ret0 },
+	{ "perror", (uintptr_t)&perror },
+	{ "pthread_atfork", (uintptr_t)&ret0 },
+	{ "puts", (uintptr_t)&puts },
+	{ "raise", (uintptr_t)&ret0 },
+	{ "rand", (uintptr_t)&rand },
+	{ "readdir", (uintptr_t)&readdir },
+	{ "sigaction", (uintptr_t)&ret0 },
+	{ "signal", (uintptr_t)&ret0 },
+	{ "sigpending", (uintptr_t)&ret0 },
+	{ "sigprocmask", (uintptr_t)&ret0 },
+	{ "strspn", (uintptr_t)&strspn },
+	{ "syslog", (uintptr_t)&ret0 },
 	{ "SL_IID_ANDROIDSIMPLEBUFFERQUEUE", (uintptr_t)&SL_IID_ANDROIDSIMPLEBUFFERQUEUE},
 	{ "SL_IID_AUDIOIODEVICECAPABILITIES", (uintptr_t)&SL_IID_AUDIOIODEVICECAPABILITIES},
 	{ "SL_IID_BUFFERQUEUE", (uintptr_t)&SL_IID_BUFFERQUEUE},
