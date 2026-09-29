@@ -1723,6 +1723,8 @@ void glBindFramebufferHook(GLenum target, GLuint framebuffer) {
 	if (!framebuffer && is_portrait) {
 		framebuffer = main_fb;
 	}
+	if (debugMode && tex_lru_frame % 600 < 3) // clear/target diagnostics, see glClearHook
+		debugPrintf("[FBO] frame %u bind %u\n", tex_lru_frame, framebuffer);
 	glBindFramebuffer(target, framebuffer);
 }
 
@@ -1749,7 +1751,22 @@ void glReadPixelsHook(GLint x, GLint y, GLsizei width, GLsizei height, GLenum fo
 	glReadPixels(x, y, width, height, format, type, data);
 }
 
-void glShaderSourceHook(GLuint shader, GLsizei count, const GLchar **string, const GLint *length) {	
+// Debug Mode: every 600 frames, log the clears of the next 3 frames (target, scissor, viewport)
+void glClearHook(GLbitfield mask) {
+	if (debugMode && tex_lru_frame % 600 < 3) {
+		GLint fb = 0, sc[4] = {0}, vp[4] = {0};
+		GLfloat cc[4] = {0};
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fb);
+		glGetIntegerv(GL_SCISSOR_BOX, sc);
+		glGetIntegerv(GL_VIEWPORT, vp);
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, cc);
+		debugPrintf("[CLR] frame %u mask 0x%X fb %d scissor %d (%d,%d %dx%d) viewport (%d,%d %dx%d) color %.2f %.2f %.2f %.2f\n",
+			tex_lru_frame, mask, fb, glIsEnabled(GL_SCISSOR_TEST), sc[0], sc[1], sc[2], sc[3], vp[0], vp[1], vp[2], vp[3], cc[0], cc[1], cc[2], cc[3]);
+	}
+	glClear(mask);
+}
+
+void glShaderSourceHook(GLuint shader, GLsizei count, const GLchar **string, const GLint *length) {
 	if (debugShaders) {
 		char glsl_path[256];
 		static int shader_idx = 0;
@@ -1766,6 +1783,7 @@ static so_default_dynlib gl_hook[] = {
 	{"glTexParameterf", (uintptr_t)&glTexParameterfHook},
 	{"glTexParameteri", (uintptr_t)&glTexParameteriHook},
 	{"glBindFramebuffer", (uintptr_t)&glBindFramebufferHook},
+	{"glClear", (uintptr_t)&glClearHook},
 	{"glReadPixels", (uintptr_t)&glReadPixelsHook},
 	{"glShaderSource", (uintptr_t)&glShaderSourceHook},
 };
@@ -2343,7 +2361,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "glBlendFunc", (uintptr_t)&glBlendFunc },
 	{ "glBufferData", (uintptr_t)&glBufferData },
 	{ "glCheckFramebufferStatusOES", (uintptr_t)&glCheckFramebufferStatus },
-	{ "glClear", (uintptr_t)&glClear },
+	{ "glClear", (uintptr_t)&glClearHook },
 	{ "glClearColor", (uintptr_t)&glClearColor },
 	{ "glClearDepthf", (uintptr_t)&glClearDepthf },
 	{ "glColorMask", (uintptr_t)&glColorMask },
