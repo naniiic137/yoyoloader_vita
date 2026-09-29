@@ -57,6 +57,7 @@ jobs:
         cmake -DLOADER=1 ..
         make -j$(nproc)
         mv loader2.bin loader.bin
+        cp YoYoLoader ../loader_bin.elf
         rm -f CMakeCache.txt
         cd ../standalone
         cmake -DLOADER=1 -DSTANDALONE=1 ..
@@ -72,6 +73,7 @@ jobs:
         cmake -DLOADER=1 -DVIDEO_SUPPORT=1 ..
         make clean
         make -j$(nproc)
+        cp YoYoLoader ../loader2_bin.elf
         rm -f CMakeCache.txt
         cmake ..
         make -j$(nproc)
@@ -86,6 +88,14 @@ jobs:
       with:
         name: YoYoLoader-vpk
         path: build/YoYoLoader.vpk
+
+    # unstripped loader ELFs, to read psp2core crash dumps with vita-parse-core
+    - uses: actions/upload-artifact@v4
+      with:
+        name: loader-elfs
+        path: |
+          loader_bin.elf
+          loader2_bin.elf
 
     - uses: svenstaro/upload-release-action@v2
       with:
