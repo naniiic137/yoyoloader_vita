@@ -2521,7 +2521,8 @@ enum ClassIDs {
 };
 
 int FindClass(void *env, const char *name) {
-	debugPrintf("FindClass %s\n", name);
+	if (strcmp(name, "java/lang/Object")) // looked up on every extension call
+		debugPrintf("FindClass %s\n", name);
 	if (!strcmp(name, "java/lang/String")) {
 		return STRING;
 	} else if (!strcmp(name, "android/media/AudioTrack")) {
@@ -2650,6 +2651,9 @@ void *CallStaticObjectMethodV(void *env, void *obj, int methodID, uintptr_t *arg
 					return &jni_double;
 				}
 			}
+			// PC ports poll Steam every frame; don't flood the log with it
+			if (!strncmp(f->method_name, "steam_", 6))
+				return NULL;
 			debugPrintf("Called undefined extension function from module %s with name %s\n", f->module_name, f->method_name);
 			return NULL;
 		}
