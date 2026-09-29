@@ -126,6 +126,8 @@ int is_portrait = 0;
 
 char data_path[256];
 static uint32_t tex_lru_frame = 0; // frame counter for the texture page LRU
+static int tex_lru_num = 0;
+static uint32_t tex_lru_bytes = 0;
 char data_path_root[256];
 char apk_path[256];
 char gxp_path[256];
@@ -967,8 +969,6 @@ typedef struct {
 	uint32_t last_frame;
 } tex_lru_entry;
 static tex_lru_entry tex_lru[TEX_LRU_MAX];
-static int tex_lru_num = 0;
-static uint32_t tex_lru_bytes = 0;
 static void (*Graphics_SetTexture)(int stage, void *tex) = NULL;
 static void (*Graphics_FlushTexture)(void *tex) = NULL;
 
