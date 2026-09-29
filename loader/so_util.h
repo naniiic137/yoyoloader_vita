@@ -62,6 +62,7 @@ int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int
 void so_symbol_fix_ldmia(so_module *mod, const char *symbol);
 void so_initialize(so_module *mod);
 uintptr_t so_symbol(so_module *mod, const char *symbol);
+int so_redirect_plt(so_module *mod, const char *symbol, uintptr_t dst);
 
 #define SO_CONTINUE(type, h, ...) ({ \
   kuKernelCpuUnrestrictedMemcpy((void *)h.addr, h.orig_instr, sizeof(h.orig_instr)); \

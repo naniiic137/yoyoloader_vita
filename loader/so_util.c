@@ -360,6 +360,21 @@ int so_relocate(so_module *mod) {
 	return 0;
 }
 
+// Points the module's own PLT calls to a symbol it defines at dst (call after so_relocate).
+// Returns the number of GOT slots redirected.
+int so_redirect_plt(so_module *mod, const char *symbol, uintptr_t dst) {
+	int n = 0;
+	for (int i = 0; i < mod->num_relplt; i++) {
+		Elf32_Rel *rel = &mod->relplt[i];
+		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
+		if (ELF32_R_TYPE(rel->r_info) == R_ARM_JUMP_SLOT && sym->st_shndx != SHN_UNDEF && !strcmp(mod->dynstr + sym->st_name, symbol)) {
+			*(uintptr_t *)(mod->text_base + rel->r_offset) = dst;
+			n++;
+		}
+	}
+	return n;
+}
+
 uintptr_t so_resolve_link(so_module *mod, const char *symbol) {
 	for (int i = 0; i < mod->num_dynamic; i++) {
 		switch (mod->dynamic[i].d_tag) {

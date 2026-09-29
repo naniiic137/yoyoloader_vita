@@ -125,6 +125,7 @@ GLuint main_fb, main_tex = 0xDEADBEEF;
 int is_portrait = 0;
 
 char data_path[256];
+static uint32_t tex_lru_frame = 0; // frame counter for the texture page LRU
 char data_path_root[256];
 char apk_path[256];
 char gxp_path[256];
@@ -864,6 +865,7 @@ void main_loop() {
 			}
 		}
 
+		tex_lru_frame++;
 		if (!is_portrait)
 			Java_com_yoyogames_runner_RunnerJNILib_Process(fake_env, 0, SCREEN_W, SCREEN_H, sensor.accelerometer.x, sensor.accelerometer.y, sensor.accelerometer.z, 0, 0, 60.0f);
 		else
@@ -942,6 +944,97 @@ double GetPlatform() {
 }
 
 uint32_t *(*ReadPNGFile) (void *a1, int a2, int *a3, int *a4, int a5);
+
+/* Externalized texture pages are kept under a memory budget: when a new page
+ * would exceed it, the least recently bound pages are flushed with the
+ * runner's own Graphics::FlushTexture (GL texture deleted, id set to -1), and
+ * the runner reloads them from their placeholder the next time they're bound.
+ * Recency comes from Graphics::SetTexture, whose PLT slot we redirect. */
+#define TEX_LRU_BUDGET (112 * 1024 * 1024)
+#define TEX_LRU_MAX 512
+typedef struct {
+	uint32_t *tex;
+	uint32_t gl_id;
+	uint32_t bytes;
+	uint32_t last_frame;
+} tex_lru_entry;
+static tex_lru_entry tex_lru[TEX_LRU_MAX];
+static int tex_lru_num = 0;
+static uint32_t tex_lru_bytes = 0;
+static void (*Graphics_SetTexture)(int stage, void *tex) = NULL;
+static void (*Graphics_FlushTexture)(void *tex) = NULL;
+
+void Graphics_SetTexture_hook(int stage, void *tex) {
+	static void *last_tex = NULL;
+	static int last_idx = -1;
+	if (tex) {
+		if (tex == last_tex && last_idx < tex_lru_num && tex_lru[last_idx].tex == tex) {
+			tex_lru[last_idx].last_frame = tex_lru_frame;
+		} else {
+			for (int i = 0; i < tex_lru_num; i++) {
+				if (tex_lru[i].tex == tex) {
+					tex_lru[i].last_frame = tex_lru_frame;
+					last_tex = tex;
+					last_idx = i;
+					break;
+				}
+			}
+		}
+	}
+	Graphics_SetTexture(stage, tex);
+}
+
+static void tex_lru_remove(int i) {
+	tex_lru_bytes -= tex_lru[i].bytes;
+	tex_lru[i] = tex_lru[--tex_lru_num];
+}
+
+// Returns 1 if anything was flushed (the caller must rebind its texture).
+static int tex_lru_make_room(uint32_t *texture, uint32_t bytes) {
+	if (!Graphics_FlushTexture)
+		return 0;
+	int flushed = 0;
+	while (tex_lru_bytes + bytes > TEX_LRU_BUDGET) {
+		int victim = -1;
+		for (int i = 0; i < tex_lru_num; i++) {
+			// Never touch pages used this frame or the previous one
+			if (tex_lru[i].tex == texture || tex_lru[i].last_frame + 1 >= tex_lru_frame)
+				continue;
+			if (victim < 0 || tex_lru[i].last_frame < tex_lru[victim].last_frame)
+				victim = i;
+		}
+		if (victim < 0)
+			break;
+		uint32_t *t = tex_lru[victim].tex;
+		// Only flush if the runner still holds the texture we loaded
+		if (t[7] == tex_lru[victim].gl_id) {
+			debugPrintf("Evicting texture page %p (%u KB, unused for %u frames)\n", t, tex_lru[victim].bytes / 1024, tex_lru_frame - tex_lru[victim].last_frame);
+			Graphics_FlushTexture(t);
+			flushed = 1;
+		}
+		tex_lru_remove(victim);
+	}
+	return flushed;
+}
+
+static void tex_lru_add(uint32_t *texture, uint32_t bytes) {
+	if (!Graphics_FlushTexture)
+		return;
+	for (int i = 0; i < tex_lru_num; i++) {
+		if (tex_lru[i].tex == texture) {
+			tex_lru_remove(i);
+			break;
+		}
+	}
+	if (tex_lru_num == TEX_LRU_MAX)
+		return;
+	tex_lru[tex_lru_num].tex = texture;
+	tex_lru[tex_lru_num].gl_id = texture[7];
+	tex_lru[tex_lru_num].bytes = bytes;
+	tex_lru[tex_lru_num].last_frame = tex_lru_frame;
+	tex_lru_num++;
+	tex_lru_bytes += bytes;
+}
 void (*FreePNGFile) ();
 void (*InvalidateTextureState) ();
 
@@ -1028,6 +1121,9 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 					fseek(f, 0x30, SEEK_SET);
 					fread(&metadata_size, 1, 4, f);
 					size -= metadata_size;
+					if (tex_lru_make_room(texture, size))
+						glBindTexture(GL_TEXTURE_2D, *tex_id);
+					tex_lru_add(texture, size);
 					ext_data = vglMalloc(size);
 					fseek(f, metadata_size, SEEK_CUR);
 					fread(ext_data, 1, size, f);
@@ -1265,6 +1361,10 @@ void patch_runner(void) {
 		case 0:
 			debugPrintf("Patching LoadTextureFromPNG to variant #5\n");
 			hook_addr(LoadTextureFromPNG, (uintptr_t)&LoadTextureFromPNG_5);
+			// Texture page budget (see tex_lru_make_room); relies on the 2024 Texture layout
+			Graphics_SetTexture = (void *)so_symbol(&yoyoloader_mod, "_ZN8Graphics10SetTextureEiPv");
+			if (Graphics_SetTexture && so_redirect_plt(&yoyoloader_mod, "_ZN8Graphics10SetTextureEiPv", (uintptr_t)&Graphics_SetTexture_hook))
+				Graphics_FlushTexture = (void *)so_symbol(&yoyoloader_mod, "_ZN8Graphics12FlushTextureEPv");
 			break;
 		case 0xE92D:
 			debugPrintf("Patching LoadTextureFromPNG to variant #1\n");
