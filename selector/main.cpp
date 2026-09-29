@@ -1604,7 +1604,10 @@ int main(int argc, char *argv[]) {
 	FILE *f;
 	
 	// Check if user wants to skip updates
-	bool skip_updates_check = strstr(stringify(GIT_VERSION), "dirty") != nullptr;
+	/* This fork adds GameMaker 2024 runtime support. The official auto-updater
+	 * would replace it with upstream Nightly (which lacks those fixes), so it is
+	 * disabled here; update this fork by installing its own releases instead. */
+	bool skip_updates_check = true;
 	bool skip_compat_update = false;
 	SceCtrlData pad;
 	sceCtrlPeekBufferPositive(0, &pad, 1);
