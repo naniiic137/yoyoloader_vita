@@ -1072,6 +1072,12 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 						} else
 							glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, width, height, 0, size, ext_data);
 						break;
+					case 0x100: // P8: 256 RGBA8 palette entries + 1 byte per pixel (tools/gm_textures.py)
+						glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, size, ext_data);
+						break;
+					case 0x101: // Raw RGBA8 (tools/gm_textures.py)
+						glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, ext_data);
+						break;
 					default:
 						debugPrintf("Unsupported externalized texture format (0x%llX).\n", format);
 						break;
@@ -3096,7 +3102,7 @@ void *pthread_main(void *arg) {
 	so_initialize(&yoyoloader_mod);
 	
 	// Initializing vitaGL
-	vglSetCircularPoolSize(3 * 1024);
+	vglSetCircularPoolSize(4 * 1024 * 1024); // per-frame vertex data; overruns fall back to a GPU alloc per draw
 	vglSetSemanticBindingMode(VGL_MODE_POSTPONED);
 	if (debugMode)
 		vglSetDisplayCallback(mem_profiler);
