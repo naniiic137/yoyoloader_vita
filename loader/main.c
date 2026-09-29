@@ -3258,7 +3258,7 @@ void *pthread_main(void *arg) {
 	so_initialize(&yoyoloader_mod);
 	
 	// Initializing vitaGL
-	vglSetCircularPoolSize(4 * 1024 * 1024); // per-frame vertex data; overruns fall back to a GPU alloc per draw
+	vglSetCircularPoolSize(3 * 1024); // keep tiny: with a real pool the runner's vertex data got overwritten mid-frame (sprites drawn in wrong places)
 	vglSetSemanticBindingMode(VGL_MODE_POSTPONED);
 	if (debugMode)
 		vglSetDisplayCallback(mem_profiler);
