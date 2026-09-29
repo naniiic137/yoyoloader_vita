@@ -1118,6 +1118,11 @@ void LoadTextureFromPNG_1(uint32_t *texture, int has_mips) {
 	LoadTextureFromPNG_generic(texture[23], texture[24], &texture[5], &texture[6], texture);
 }
 
+// GMS 2024.x: data/size at +0x60/+0x64, flags at +0x18, texture id at +0x1C
+void LoadTextureFromPNG_5(uint32_t *texture, int has_mips) {
+	LoadTextureFromPNG_generic(texture[24], texture[25], &texture[6], &texture[7], texture);
+}
+
 void LoadTextureFromPNG_2(uint32_t *texture, int has_mips) {
 	LoadTextureFromPNG_generic(texture[11], texture[12], &texture[4], &texture[5], texture);
 }
@@ -1249,7 +1254,18 @@ void patch_runner(void) {
 			p++;
 		}
 	} else {
-		switch (*LoadTextureFromPNG >> 16) {
+		int is_2024 = 0;
+		for (int i = 0; i < 32; i++) {
+			if (LoadTextureFromPNG[i] == 0xE1C466D0) { // LDRD R6, R7, [R4,#0x60]
+				is_2024 = 1;
+				break;
+			}
+		}
+		switch (is_2024 ? 0 : (*LoadTextureFromPNG >> 16)) {
+		case 0:
+			debugPrintf("Patching LoadTextureFromPNG to variant #5\n");
+			hook_addr(LoadTextureFromPNG, (uintptr_t)&LoadTextureFromPNG_5);
+			break;
 		case 0xE92D:
 			debugPrintf("Patching LoadTextureFromPNG to variant #1\n");
 			hook_addr(LoadTextureFromPNG, (uintptr_t)&LoadTextureFromPNG_1);
