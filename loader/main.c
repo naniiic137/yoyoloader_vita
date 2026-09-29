@@ -952,6 +952,7 @@ uint32_t *(*ReadPNGFile) (void *a1, int a2, int *a3, int *a4, int a5);
  * Recency comes from Graphics::SetTexture, whose PLT slot we redirect. */
 #define TEX_LRU_BUDGET (112 * 1024 * 1024)
 #define TEX_LRU_MAX 512
+#define TEX_LRU_MARGIN (8 * 1024 * 1024) // free memory to keep for everything else
 typedef struct {
 	uint32_t *tex;
 	uint32_t gl_id;
@@ -994,17 +995,27 @@ static int tex_lru_make_room(uint32_t *texture, uint32_t bytes) {
 	if (!Graphics_FlushTexture)
 		return 0;
 	int flushed = 0;
-	while (tex_lru_bytes + bytes > TEX_LRU_BUDGET) {
+	// Freed textures only go back to the pool after vitaGL's garbage collector runs,
+	// so count what we release instead of re-reading the free memory
+	uint32_t free_mem = vglMemFree(VGL_MEM_ALL), released = 0;
+	for (;;) {
+		int over_budget = tex_lru_bytes + bytes > TEX_LRU_BUDGET;
+		int low_mem = free_mem + released < bytes + TEX_LRU_MARGIN;
+		if (!over_budget && !low_mem)
+			break;
 		int victim = -1;
 		for (int i = 0; i < tex_lru_num; i++) {
-			// Never touch pages used this frame or the previous one
-			if (tex_lru[i].tex == texture || tex_lru[i].last_frame + 1 >= tex_lru_frame)
+			if (tex_lru[i].tex == texture)
+				continue;
+			// Over budget only evicts pages unused for 2+ frames; low memory takes any page
+			if (!low_mem && tex_lru[i].last_frame + 1 >= tex_lru_frame)
 				continue;
 			if (victim < 0 || tex_lru[i].last_frame < tex_lru[victim].last_frame)
 				victim = i;
 		}
 		if (victim < 0)
 			break;
+		released += tex_lru[victim].bytes;
 		uint32_t *t = tex_lru[victim].tex;
 		// Only flush if the runner still holds the texture we loaded
 		if (t[7] == tex_lru[victim].gl_id) {
@@ -1123,12 +1134,40 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 					size -= metadata_size;
 					if (tex_lru_make_room(texture, size))
 						glBindTexture(GL_TEXTURE_2D, *tex_id);
+					fseek(f, metadata_size, SEEK_CUR);
+					if (format == 0x100 || format == 0x101) {
+						// tools/gm_textures.py pages: read straight into texture memory (no temp copy)
+						void *pal = NULL, *px = NULL;
+						if (format == 0x100) {
+							glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, size, NULL);
+							SceGxmTexture *gxm_tex = vglGetGxmTexture(GL_TEXTURE_2D);
+							pal = gxm_tex ? sceGxmTextureGetPalette(gxm_tex) : NULL;
+						} else {
+							glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+						}
+						px = vglGetTexDataPointer(GL_TEXTURE_2D);
+						if (px && (format == 0x101 || pal)) {
+							if (pal)
+								fread(pal, 1, 256 * 4, f);
+							fread(px, 1, format == 0x100 ? size - 256 * 4 : size, f);
+							tex_lru_add(texture, size);
+						} else {
+							// Out of memory: leave the texture invalid so the runner retries once freed pages are gone
+							debugPrintf("Out of memory for %s (%u KB, free %u KB), retrying later\n", fname, size / 1024, vglMemFree(VGL_MEM_ALL) / 1024);
+							glDeleteTextures(1, tex_id);
+							*tex_id = 0xFFFFFFFF;
+						}
+						fclose(f);
+						ext_data = NULL;
+					} else {
 					tex_lru_add(texture, size);
 					ext_data = vglMalloc(size);
-					fseek(f, metadata_size, SEEK_CUR);
 					fread(ext_data, 1, size, f);
 					fclose(f);
-					switch (format) {
+					}
+					switch (ext_data ? format : 0xFFFF) {
+					case 0xFFFF:
+						break;
 					case 0x00:
 						glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGB_PVRTC_2BPPV1_IMG, width, height, 0, size, ext_data);
 						break;
@@ -1168,12 +1207,6 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 						} else
 							glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, width, height, 0, size, ext_data);
 						break;
-					case 0x100: // P8: 256 RGBA8 palette entries + 1 byte per pixel (tools/gm_textures.py)
-						glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, size, ext_data);
-						break;
-					case 0x101: // Raw RGBA8 (tools/gm_textures.py)
-						glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, ext_data);
-						break;
 					default:
 						debugPrintf("Unsupported externalized texture format (0x%llX).\n", format);
 						break;
@@ -1188,7 +1221,8 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 					ext_data = stbi_load(fname, &width, &height, NULL, 4);
 					upload_rgba_texture(width, height, ext_data);
 				}
-				vglFree(ext_data);
+				if (ext_data)
+					vglFree(ext_data);
 			} else {
 				upload_rgba_texture(width, height, data);
 			}
