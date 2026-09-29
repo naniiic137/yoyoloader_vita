@@ -1133,8 +1133,47 @@ void LoadTextureFromPNG_generic(uint32_t arg1, uint32_t arg2, uint32_t *flags, u
 #else
 				sprintf(fname, "%s%u.pvr", data_path, idx);
 #endif
-				FILE *f = fopen(fname, "rb");
-				if (f) {
+				// tools/gm_textures.py pages (P8 / RGBA8): sceIo only, so a full newlib heap can't make
+				// the open fail (fopen needs malloc) and turn the page into its 2x1 placeholder
+				int handled = 0;
+				ext_data = NULL;
+				SceUID pfd = sceIoOpen(fname, SCE_O_RDONLY, 0);
+				if (pfd >= 0) {
+					uint32_t hdr[13];
+					if (sceIoRead(pfd, hdr, sizeof(hdr)) == sizeof(hdr) && (hdr[2] == 0x100 || hdr[2] == 0x101) && hdr[3] == 0) {
+						handled = 1;
+						uint32_t format = hdr[2];
+						height = hdr[6];
+						width = hdr[7];
+						uint32_t size = sceIoLseek32(pfd, 0, SCE_SEEK_END) - sizeof(hdr) - hdr[12];
+						sceIoLseek32(pfd, sizeof(hdr) + hdr[12], SCE_SEEK_SET);
+						debugPrintf("Loading page %s (%ux%u %s) [vitaGL free %u KB, pages %u KB in %d]\n", fname, width, height, format == 0x100 ? "P8" : "RGBA", vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
+						if (tex_lru_make_room(texture, size))
+							glBindTexture(GL_TEXTURE_2D, *tex_id);
+						void *pal = NULL, *px = NULL;
+						if (format == 0x100) {
+							glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_PALETTE8_RGBA8_OES, width, height, 0, size, NULL);
+							SceGxmTexture *gxm_tex = vglGetGxmTexture(GL_TEXTURE_2D);
+							pal = gxm_tex ? sceGxmTextureGetPalette(gxm_tex) : NULL;
+						} else {
+							glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+						}
+						px = vglGetTexDataPointer(GL_TEXTURE_2D);
+						uint32_t px_size = format == 0x100 ? size - 256 * 4 : size;
+						if (px && (format == 0x101 || pal) && (!pal || sceIoRead(pfd, pal, 256 * 4) == 256 * 4) && sceIoRead(pfd, px, px_size) == px_size) {
+							tex_lru_add(texture, size);
+						} else {
+							// Leave the texture invalid so the runner retries it on a later frame
+							debugPrintf("Could not load %s (%u KB, vitaGL free %u KB), retrying later\n", fname, size / 1024, vglMemFree(VGL_MEM_ALL) / 1024);
+							glDeleteTextures(1, tex_id);
+							*tex_id = 0xFFFFFFFF;
+						}
+					}
+					sceIoClose(pfd);
+				}
+				FILE *f = handled ? NULL : fopen(fname, "rb");
+				if (handled) {
+				} else if (f) {
 					debugPrintf("Loading externalized texture %s (Raw ID: 0x%X) [vitaGL free %u KB, pages %u KB in %d]\n", fname, data[1], vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 					fseek(f, 0, SEEK_END);
 					uint32_t size = ftell(f) - 0x34;
