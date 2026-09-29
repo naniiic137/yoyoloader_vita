@@ -200,7 +200,10 @@ def parse_chunks(d):
 
 def main():
     dxt5 = '--dxt5' in sys.argv
-    args = [a for a in sys.argv[1:] if a != '--dxt5']
+    # --keep-textures: leave texture pages in game.droid (the runner decodes them itself;
+    # the loader uploads them as P8), only apply the audio changes
+    keep_textures = '--keep-textures' in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ('--dxt5', '--keep-textures')]
     if len(args) != 2:
         print(__doc__)
         sys.exit(1)
@@ -226,6 +229,9 @@ def main():
     new_txtr = bytearray(d[t_start:first_blob])  # count, pointers, entries (+ padding)
 
     total_p8 = total_rgba = 0
+    if keep_textures:
+        new_txtr = bytearray(d[t_start:t_start + t_size])
+        entries = []
     for i, e in enumerate(entries):
         blob = d[e[6]:e[6] + e[2]]
         w, h, img = decode_page(blob)
@@ -298,7 +304,10 @@ def main():
     chk = bytes(out)
     for i, p in enumerate(ptrs):
         e = struct.unpack('<7I', chk[p:p + 28])
-        assert chk[e[6]:e[6] + 8] == b'\x89PNG\r\n\x1a\n', 'page %d placeholder check failed' % i
+        if not keep_textures:
+            assert chk[e[6]:e[6] + 8] == b'\x89PNG\r\n\x1a\n', 'page %d placeholder check failed' % i
+        else:
+            assert chk[e[6]:e[6] + 4] in (b'2zoq', b'fioq', b'\x89PNG'), 'page %d data check failed' % i
 
     new_apk = os.path.join(out_dir, 'game.apk')
     with zipfile.ZipFile(apk_path) as src, zipfile.ZipFile(new_apk, 'w') as dst:

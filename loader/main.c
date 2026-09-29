@@ -1343,6 +1343,33 @@ void LoadTextureFromPNG_5(uint32_t *texture, int has_mips) {
 	LoadTextureFromPNG_generic(texture[24], texture[25], &texture[6], &texture[7], texture);
 }
 
+// GMS 2024.x QOI/bzip2 pages (the runner's own decoder), uploaded as P8 when they have
+// <= 256 colours and kept under the page budget. Mirrors LoadTextureFromQOIF otherwise.
+uint32_t *(*ReadQOIFFile)(void *data, int size, int *w, int *h, int flag);
+void (*FreeQOIFFile)(void *data);
+int LoadTextureFromQOIF_hook(uint32_t *texture, int has_mips) {
+	int width, height;
+	uint32_t *data = ReadQOIFFile((void *)texture[24], texture[25], &width, &height, (texture[6] & 2) == 0);
+	if (!data) {
+		debugPrintf("ERROR: Failed to load a QOI texture!\n");
+		return 0;
+	}
+	InvalidateTextureState();
+	texture[1] = width;
+	texture[2] = height;
+	uint32_t bytes = width * height; // P8 estimate for the budget
+	tex_lru_make_room(texture, bytes);
+	glGenTextures(1, &texture[7]);
+	glBindTexture(GL_TEXTURE_2D, texture[7]);
+	upload_rgba_texture(width, height, data);
+	texture[6] |= 0x40;
+	FreeQOIFFile(data);
+	texture[0] = 6;
+	tex_lru_add(texture, bytes);
+	debugPrintf("QOI page %dx%d [vitaGL free %u KB, pages %u KB in %d]\n", width, height, vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
+	return texture[7];
+}
+
 void LoadTextureFromPNG_2(uint32_t *texture, int has_mips) {
 	LoadTextureFromPNG_generic(texture[11], texture[12], &texture[4], &texture[5], texture);
 }
@@ -1489,6 +1516,10 @@ void patch_runner(void) {
 			Graphics_SetTexture = (void *)so_symbol(&yoyoloader_mod, "_ZN8Graphics10SetTextureEiPv");
 			if (Graphics_SetTexture && so_redirect_plt(&yoyoloader_mod, "_ZN8Graphics10SetTextureEiPv", (uintptr_t)&Graphics_SetTexture_hook))
 				Graphics_FlushTexture = (void *)so_symbol(&yoyoloader_mod, "_ZN8Graphics12FlushTextureEPv");
+			ReadQOIFFile = (void *)so_symbol(&yoyoloader_mod, "_Z12ReadQOIFFilePviPiS0_b");
+			FreeQOIFFile = (void *)so_symbol(&yoyoloader_mod, "_Z12FreeQOIFFilePh");
+			if (ReadQOIFFile && FreeQOIFFile)
+				hook_addr(so_symbol(&yoyoloader_mod, "_Z19LoadTextureFromQOIFP7Texture10eMipEnable"), (uintptr_t)&LoadTextureFromQOIF_hook);
 			break;
 		case 0xE92D:
 			debugPrintf("Patching LoadTextureFromPNG to variant #1\n");
