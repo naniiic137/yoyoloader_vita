@@ -246,6 +246,12 @@ def main():
     first_blob = min(e[6] for e in entries)
     new_txtr = bytearray(d[t_start:first_blob])  # count, pointers, entries (+ padding)
 
+    # pages.idx: (blob size, crc32 of its first 256 bytes) per page, so the loader can
+    # match an original QOI page to assets/<i>.pvr (Debug Mode comparison)
+    with open(os.path.join(assets_dir, 'pages.idx'), 'wb') as f:
+        for e in entries:
+            f.write(struct.pack('<II', e[2], zlib.crc32(d[e[6]:e[6] + min(e[2], 256)]) & 0xffffffff))
+
     total_p8 = total_rgba = 0
     if keep_textures:
         new_txtr = bytearray(d[t_start:t_start + t_size])

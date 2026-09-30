@@ -1343,6 +1343,72 @@ void LoadTextureFromPNG_5(uint32_t *texture, int has_mips) {
 // <= 256 colours and kept under the page budget. Mirrors LoadTextureFromQOIF otherwise.
 uint32_t *(*ReadQOIFFile)(void *data, int size, int *w, int *h, int flag);
 void (*FreeQOIFFile)(void *data);
+// Debug Mode: compare a runner-decoded page with the matching gm_textures.py .pvr
+// (found through assets/pages.idx: blob size + crc32 of its first 256 bytes)
+static void compare_page_with_pvr(uint8_t *blob, uint32_t blob_size, uint32_t *rgba, int w, int h) {
+	static uint32_t *idx = NULL;
+	static int idx_num = -1;
+	char fname[256];
+	if (idx_num < 0) {
+		idx_num = 0;
+		sprintf(fname, "%spages.idx", data_path);
+		SceUID fd = sceIoOpen(fname, SCE_O_RDONLY, 0);
+		if (fd >= 0) {
+			int sz = sceIoLseek32(fd, 0, SCE_SEEK_END);
+			sceIoLseek32(fd, 0, SCE_SEEK_SET);
+			idx = malloc(sz);
+			if (idx && sceIoRead(fd, idx, sz) == sz)
+				idx_num = sz / 8;
+			sceIoClose(fd);
+		}
+	}
+	uint32_t crc = crc32(0, blob, blob_size < 256 ? blob_size : 256);
+	int page = -1;
+	for (int i = 0; i < idx_num; i++) {
+		if (idx[i * 2] == blob_size && idx[i * 2 + 1] == crc) {
+			page = i;
+			break;
+		}
+	}
+	if (page < 0) {
+		debugPrintf("[CMP] no pages.idx match for a %dx%d page\n", w, h);
+		return;
+	}
+	sprintf(fname, "%s%d.pvr", data_path, page);
+	SceUID fd = sceIoOpen(fname, SCE_O_RDONLY, 0);
+	if (fd < 0) {
+		debugPrintf("[CMP] page %d: %s missing\n", page, fname);
+		return;
+	}
+	uint32_t hdr[13];
+	sceIoRead(fd, hdr, sizeof(hdr));
+	uint32_t n = w * h, mism = 0, first = 0xFFFFFFFF, got_first = 0, want_first = 0;
+	uint8_t *buf = vglMalloc(hdr[2] == 0x100 ? 1024 + n : n * 4);
+	if (!buf) {
+		sceIoClose(fd);
+		return;
+	}
+	sceIoRead(fd, buf, hdr[2] == 0x100 ? 1024 + n : n * 4);
+	sceIoClose(fd);
+	for (uint32_t i = 0; i < n; i++) {
+		uint32_t px = hdr[2] == 0x100 ? ((uint32_t *)buf)[buf[1024 + i]] : ((uint32_t *)buf)[i];
+		if (px != rgba[i]) {
+			if (!mism) {
+				first = i;
+				got_first = rgba[i];
+				want_first = px;
+			}
+			mism++;
+		}
+	}
+	vglFree(buf);
+	if (mism)
+		debugPrintf("[CMP] page %d (%ux%u fmt 0x%X vs %dx%d): %u pixels differ, first at (%u,%u): runner %08X pvr %08X\n",
+			page, hdr[7], hdr[6], hdr[2], w, h, mism, first % w, first / w, got_first, want_first);
+	else
+		debugPrintf("[CMP] page %d: identical to runner decode\n", page);
+}
+
 int LoadTextureFromQOIF_hook(uint32_t *texture, int has_mips) {
 	// gm_textures.py QOI placeholders (real size in the header, marker at +37): load the .pvr
 	uint8_t *blob = (uint8_t *)texture[24];
@@ -1356,6 +1422,8 @@ int LoadTextureFromQOIF_hook(uint32_t *texture, int has_mips) {
 		debugPrintf("ERROR: Failed to load a QOI texture!\n");
 		return 0;
 	}
+	if (debugMode)
+		compare_page_with_pvr((uint8_t *)texture[24], texture[25], data, width, height);
 	InvalidateTextureState();
 	texture[1] = width;
 	texture[2] = height;
