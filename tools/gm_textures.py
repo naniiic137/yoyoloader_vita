@@ -106,7 +106,10 @@ def decode_page(blob):
     if magic in (b'2zoq', b'fioq'):
         w, h = struct.unpack('<HH', blob[4:8])
         if magic == b'2zoq':
+            # the bzip2 stream holds a complete "fioq" file (12-byte header + QOI ops)
             raw = bz2.decompress(blob[12:])
+            if raw[:4] == b'fioq':
+                raw = raw[12:12 + struct.unpack('<I', raw[8:12])[0]]
         else:
             raw = blob[12:12 + struct.unpack('<I', blob[8:12])[0]]
         return w, h, _qoi_decode(np.frombuffer(raw, np.uint8), w, h).reshape(h, w, 4)
