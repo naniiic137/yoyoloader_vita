@@ -307,10 +307,75 @@ void perf_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei
 	perf_tex_uploads++;
 }
 
+void perf_glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices) {
+	uint64_t t = perf_now();
+	glDrawElements(mode, count, type, indices);
+	perf_gl_us += perf_now() - t;
+	perf_draws++;
+}
+
+void perf_glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data) {
+	uint64_t t = perf_now();
+	glBufferSubData(target, offset, size, data);
+	perf_gl_us += perf_now() - t;
+	perf_buffers++;
+	perf_buffer_bytes += size;
+}
+
+// Graphics functions the runner fetches through dlsym, counted when perf=1
+void *perf_gl_lookup(const char *symbol) {
+	if (!tune_perf)
+		return NULL;
+	if (!strcmp(symbol, "glDrawArrays")) return (void *)perf_glDrawArrays;
+	if (!strcmp(symbol, "glDrawElements")) return (void *)perf_glDrawElements;
+	if (!strcmp(symbol, "glBufferData")) return (void *)perf_glBufferData;
+	if (!strcmp(symbol, "glBufferSubData")) return (void *)perf_glBufferSubData;
+	if (!strcmp(symbol, "glTexImage2D")) return (void *)perf_glTexImage2D;
+	return NULL;
+}
+
+/*
+ * Timers around the runner's per-frame steps (only installed when perf=1, all on the main thread).
+ * Each wrapper restores the original code, calls it and re-patches (SO_CONTINUE).
+ */
+enum { PS_BEGIN, PS_IO, PS_UPDATE, PS_COLLISION, PS_DRAW, PS_LAYERS, PS_FINISH, PS_END, PS_AUDIO, PS_COUNT };
+static const char *perf_step_name[PS_COUNT] = { "begin", "input", "update", "collision", "draw", "room layers", "finish frame", "end", "audio" };
+static const char *perf_step_sym[PS_COUNT] = {
+	"_Z13DoAStep_Beginv", "_Z10DoAStep_IOv", "_Z14DoAStep_Updatev", "_Z15HandleCollisionv", "_Z12DoAStep_Drawv",
+	"_Z14DrawRoomLayersP9tagYYRECTi", "_Z19GR_D3D_Finish_Frameb", "_Z11DoAstep_Endv", "_Z10Audio_Tickv" };
+static so_hook perf_hook[PS_COUNT];
+static uint64_t perf_step_us[PS_COUNT];
+
+#define PERF_WRAP0(idx, fname) \
+	void fname(void) { uint64_t t = perf_now(); SO_CONTINUE(int, perf_hook[idx]); perf_step_us[idx] += perf_now() - t; }
+PERF_WRAP0(PS_BEGIN, perf_step_begin)
+PERF_WRAP0(PS_IO, perf_step_io)
+PERF_WRAP0(PS_UPDATE, perf_step_update)
+PERF_WRAP0(PS_COLLISION, perf_step_collision)
+PERF_WRAP0(PS_DRAW, perf_step_draw)
+PERF_WRAP0(PS_END, perf_step_end)
+PERF_WRAP0(PS_AUDIO, perf_step_audio)
+void perf_step_layers(void *rect, int a) { uint64_t t = perf_now(); SO_CONTINUE(int, perf_hook[PS_LAYERS], rect, a); perf_step_us[PS_LAYERS] += perf_now() - t; }
+void perf_step_finish(int a) { uint64_t t = perf_now(); SO_CONTINUE(int, perf_hook[PS_FINISH], a); perf_step_us[PS_FINISH] += perf_now() - t; }
+
+void perf_install_hooks(void) {
+	void *wrap[PS_COUNT] = { perf_step_begin, perf_step_io, perf_step_update, perf_step_collision, perf_step_draw,
+		perf_step_layers, perf_step_finish, perf_step_end, perf_step_audio };
+	for (int i = 0; i < PS_COUNT; i++) {
+		uintptr_t addr = so_symbol(&yoyoloader_mod, perf_step_sym[i]);
+		if (addr)
+			perf_hook[i] = hook_addr(addr, (uintptr_t)wrap[i]);
+	}
+}
+
 // Called once per frame with the time spent in the runner's Process and in the buffer swap.
 void perf_frame(uint64_t process_us, uint64_t swap_us) {
-	static uint64_t start, sum_process, sum_swap, sum_gl, max_frame, last;
+	static uint64_t start, sum_process, sum_swap, sum_gl, max_frame, last, sum_step[PS_COUNT];
 	static uint32_t frames, draws, buffers, buffer_bytes, uploads;
+	for (int i = 0; i < PS_COUNT; i++) {
+		sum_step[i] += perf_step_us[i];
+		perf_step_us[i] = 0;
+	}
 	uint64_t now = perf_now();
 	if (!start)
 		start = last = now;
@@ -330,7 +395,7 @@ void perf_frame(uint64_t process_us, uint64_t swap_us) {
 	if (++frames < 120)
 		return;
 	uint64_t elapsed = now - start;
-	char line[512];
+	char line[1024];
 	int len = snprintf(line, sizeof(line),
 		"[PERF] pool=%dKB vsync=%d | %.1f fps | per frame: total %.1f ms, runner Process %.1f ms "
 		"(of which GL calls %.1f ms), swap %.1f ms, worst frame %.1f ms | %u draws, %u buffer uploads "
@@ -338,6 +403,12 @@ void perf_frame(uint64_t process_us, uint64_t swap_us) {
 		tune_pool_kb, tune_vsync, frames * 1000000.0 / (double)elapsed, elapsed / 1000.0 / frames,
 		sum_process / 1000.0 / frames, sum_gl / 1000.0 / frames, sum_swap / 1000.0 / frames, max_frame / 1000.0,
 		draws / frames, buffers / frames, buffer_bytes / frames / 1024, uploads);
+	len += snprintf(line + len, sizeof(line) - len, "        steps (ms per frame):");
+	for (int i = 0; i < PS_COUNT; i++) {
+		len += snprintf(line + len, sizeof(line) - len, " %s %.1f%s", perf_step_name[i], sum_step[i] / 1000.0 / frames,
+			i == PS_COUNT - 1 ? "\n" : ",");
+		sum_step[i] = 0;
+	}
 	SceUID fd = sceIoOpen("ux0:data/gms/shared/perf.log", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
 	if (fd >= 0) {
 		sceIoWrite(fd, line, len);
@@ -902,6 +973,8 @@ void main_loop() {
 	
 	setup_ended = 1;
 	glReleaseShaderCompiler();
+	if (tune_perf)
+		perf_install_hooks();
 	for (;;) {
 		if (post_active) {
 			SceKernelThreadInfo info;
@@ -2874,6 +2947,9 @@ static so_default_dynlib default_dynlib[] = {
 };
 
 void *dlsym_hook( void *handle, const char *symbol) {
+	void *perf_fn = perf_gl_lookup(symbol);
+	if (perf_fn)
+		return perf_fn;
 	for (size_t i = 0; i < gl_numret; ++i) {
 		if (!strcmp(symbol, gl_ret0[i])) {
 			return ret0;
@@ -3455,6 +3531,7 @@ void *pthread_main(void *arg) {
 	sprintf(apk_path, "%s/%s/game.apk", DATA_PATH, game_name);
 #endif
 	sprintf(data_path_root, "%s/%s/", DATA_PATH, game_name);
+	read_tune(data_path_root);
 	sprintf(data_path, "%s/%s/assets/", DATA_PATH, game_name);
 	recursive_mkdir(data_path);
 	
@@ -3597,7 +3674,6 @@ void *pthread_main(void *arg) {
 	// Initializing vitaGL
 	// Default stays tiny (3 KB). It was raised to 4 MB once, together with the broken page decoder
 	// later fixed in gm_textures.py, so a bigger pool is now worth re-testing: set it in tune.txt.
-	read_tune(data_path_root);
 	vglSetCircularPoolSize(tune_pool_kb * 1024);
 	vglSetSemanticBindingMode(VGL_MODE_POSTPONED);
 	if (debugMode)
