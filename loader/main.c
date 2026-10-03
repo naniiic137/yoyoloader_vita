@@ -229,6 +229,125 @@ int debugPrintf(char *text, ...) {
 }
 #endif
 
+/*
+ * Performance tuning and measurement, set per game in ux0:data/gms/<game>/tune.txt
+ * (one "key=value" per line; a missing file or key keeps the default):
+ *   pool=<KB>   vitaGL circular vertex pool (default 3: almost every draw allocates GPU memory)
+ *   vsync=0|1   wait for the vertical blank on each swap (default 1)
+ *   perf=0|1    write a timing line every 120 frames to ux0:data/gms/shared/perf.log (default 0)
+ * perf works with Debug Mode off, so the numbers aren't skewed by the debug overlay.
+ */
+int tune_pool_kb = 3;
+int tune_vsync = 1;
+int tune_perf = 0;
+
+void read_tune(const char *game_root) {
+	char path[512], buf[512];
+	snprintf(path, sizeof(path), "%stune.txt", game_root);
+	SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0777);
+	if (fd < 0)
+		return;
+	int n = sceIoRead(fd, buf, sizeof(buf) - 1);
+	sceIoClose(fd);
+	if (n <= 0)
+		return;
+	buf[n] = 0;
+	char *s;
+	if ((s = strstr(buf, "pool=")))
+		tune_pool_kb = atoi(s + 5);
+	if ((s = strstr(buf, "vsync=")))
+		tune_vsync = atoi(s + 6);
+	if ((s = strstr(buf, "perf=")))
+		tune_perf = atoi(s + 5);
+	if (tune_pool_kb < 3)
+		tune_pool_kb = 3;
+	if (tune_pool_kb > 16 * 1024)
+		tune_pool_kb = 16 * 1024;
+}
+
+// Counters for the perf log (only touched when tune_perf is on)
+static uint64_t perf_gl_us;
+static uint32_t perf_draws, perf_buffers, perf_buffer_bytes, perf_tex_uploads;
+
+static inline uint64_t perf_now(void) {
+	return sceKernelGetProcessTimeWide();
+}
+
+void perf_glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+	if (!tune_perf) {
+		glDrawArrays(mode, first, count);
+		return;
+	}
+	uint64_t t = perf_now();
+	glDrawArrays(mode, first, count);
+	perf_gl_us += perf_now() - t;
+	perf_draws++;
+}
+
+void perf_glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
+	if (!tune_perf) {
+		glBufferData(target, size, data, usage);
+		return;
+	}
+	uint64_t t = perf_now();
+	glBufferData(target, size, data, usage);
+	perf_gl_us += perf_now() - t;
+	perf_buffers++;
+	perf_buffer_bytes += size;
+}
+
+void perf_glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *data) {
+	if (!tune_perf) {
+		glTexImage2D(target, level, internalformat, width, height, border, format, type, data);
+		return;
+	}
+	uint64_t t = perf_now();
+	glTexImage2D(target, level, internalformat, width, height, border, format, type, data);
+	perf_gl_us += perf_now() - t;
+	perf_tex_uploads++;
+}
+
+// Called once per frame with the time spent in the runner's Process and in the buffer swap.
+void perf_frame(uint64_t process_us, uint64_t swap_us) {
+	static uint64_t start, sum_process, sum_swap, sum_gl, max_frame, last;
+	static uint32_t frames, draws, buffers, buffer_bytes, uploads;
+	uint64_t now = perf_now();
+	if (!start)
+		start = last = now;
+	uint64_t frame = now - last;
+	last = now;
+	if (frame > max_frame)
+		max_frame = frame;
+	sum_process += process_us;
+	sum_swap += swap_us;
+	sum_gl += perf_gl_us;
+	draws += perf_draws;
+	buffers += perf_buffers;
+	buffer_bytes += perf_buffer_bytes;
+	uploads += perf_tex_uploads;
+	perf_gl_us = 0;
+	perf_draws = perf_buffers = perf_buffer_bytes = perf_tex_uploads = 0;
+	if (++frames < 120)
+		return;
+	uint64_t elapsed = now - start;
+	char line[512];
+	int len = snprintf(line, sizeof(line),
+		"[PERF] pool=%dKB vsync=%d | %.1f fps | per frame: total %.1f ms, runner Process %.1f ms "
+		"(of which GL calls %.1f ms), swap %.1f ms, worst frame %.1f ms | %u draws, %u buffer uploads "
+		"(%u KB), %u texture uploads\n",
+		tune_pool_kb, tune_vsync, frames * 1000000.0 / (double)elapsed, elapsed / 1000.0 / frames,
+		sum_process / 1000.0 / frames, sum_gl / 1000.0 / frames, sum_swap / 1000.0 / frames, max_frame / 1000.0,
+		draws / frames, buffers / frames, buffer_bytes / frames / 1024, uploads);
+	SceUID fd = sceIoOpen("ux0:data/gms/shared/perf.log", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+	if (fd >= 0) {
+		sceIoWrite(fd, line, len);
+		sceIoClose(fd);
+	}
+	start = now;
+	sum_process = sum_swap = sum_gl = max_frame = 0;
+	frames = draws = buffers = buffer_bytes = uploads = 0;
+}
+
 struct android_dirent {
 	char pad[18];
 	unsigned char d_type;
@@ -888,10 +1007,13 @@ void main_loop() {
 				(unsigned)mi.uordblks / 1024, newlib_heap_used() / 1024, _newlib_heap_size / 1024, vglMemFree(VGL_MEM_RAM) / 1024, vglMemFree(VGL_MEM_VRAM) / 1024,
 				vglMemFree(VGL_MEM_PHYCONT) / 1024, vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 		}
+		uint64_t perf_t0 = tune_perf ? perf_now() : 0;
+		uint64_t perf_swap_us = 0;
 		if (!is_portrait)
 			Java_com_yoyogames_runner_RunnerJNILib_Process(fake_env, 0, SCREEN_W, SCREEN_H, sensor.accelerometer.x, sensor.accelerometer.y, sensor.accelerometer.z, 0, 0, 60.0f);
 		else
-			Java_com_yoyogames_runner_RunnerJNILib_Process(fake_env, 0, SCREEN_H, SCREEN_W, sensor.accelerometer.x, sensor.accelerometer.y, sensor.accelerometer.z, 0, 0x3FF00000, 60.0f);	
+			Java_com_yoyogames_runner_RunnerJNILib_Process(fake_env, 0, SCREEN_H, SCREEN_W, sensor.accelerometer.x, sensor.accelerometer.y, sensor.accelerometer.z, 0, 0x3FF00000, 60.0f);
+		uint64_t perf_process_us = tune_perf ? perf_now() - perf_t0 : 0;
 		if (!Java_com_yoyogames_runner_RunnerJNILib_canFlip || Java_com_yoyogames_runner_RunnerJNILib_canFlip()) {
 			if (is_portrait) {
 				int prog;
@@ -942,9 +1064,14 @@ void main_loop() {
 				}
 				vglSwapBuffers(GL_TRUE);
 			} else {
+				uint64_t perf_s0 = tune_perf ? perf_now() : 0;
 				vglSwapBuffers(GL_FALSE);
+				if (tune_perf)
+					perf_swap_us = perf_now() - perf_s0;
 			}
 		}
+		if (tune_perf)
+			perf_frame(perf_process_us, perf_swap_us);
 	}
 }
 
@@ -2456,7 +2583,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "glBindFramebufferOES", (uintptr_t)&glBindFramebufferHook },
 	{ "glBindTexture", (uintptr_t)&glBindTexture },
 	{ "glBlendFunc", (uintptr_t)&glBlendFunc },
-	{ "glBufferData", (uintptr_t)&glBufferData },
+	{ "glBufferData", (uintptr_t)&perf_glBufferData },
 	{ "glCheckFramebufferStatusOES", (uintptr_t)&glCheckFramebufferStatus },
 	{ "glClear", (uintptr_t)&glClearHook },
 	{ "glClearColor", (uintptr_t)&glClearColor },
@@ -2471,7 +2598,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "glDepthRangef", (uintptr_t)&glDepthRangef },
 	{ "glDisable", (uintptr_t)&glDisable },
 	{ "glDisableClientState", (uintptr_t)&glDisableClientState },
-	{ "glDrawArrays", (uintptr_t)&glDrawArrays },
+	{ "glDrawArrays", (uintptr_t)&perf_glDrawArrays },
 	{ "glEnable", (uintptr_t)&glEnable },
 	{ "glEnableClientState", (uintptr_t)&glEnableClientState },
 	{ "glFlush", (uintptr_t)&glFlush },
@@ -2500,7 +2627,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "glScissor", (uintptr_t)&glScissor },
 	{ "glTexCoordPointer", (uintptr_t)&glTexCoordPointer },
 	{ "glTexEnvi", (uintptr_t)&glTexEnvi },
-	{ "glTexImage2D", (uintptr_t)&glTexImage2D },
+	{ "glTexImage2D", (uintptr_t)&perf_glTexImage2D },
 	{ "glTexParameterf", (uintptr_t)&glTexParameterfHook },
 	{ "glTexParameteri", (uintptr_t)&glTexParameteriHook },
 	{ "glVertexPointer", (uintptr_t)&glVertexPointer },
@@ -3468,7 +3595,10 @@ void *pthread_main(void *arg) {
 	so_initialize(&yoyoloader_mod);
 	
 	// Initializing vitaGL
-	vglSetCircularPoolSize(3 * 1024); // keep tiny: with a real pool the runner's vertex data got overwritten mid-frame (sprites drawn in wrong places)
+	// Default stays tiny (3 KB). It was raised to 4 MB once, together with the broken page decoder
+	// later fixed in gm_textures.py, so a bigger pool is now worth re-testing: set it in tune.txt.
+	read_tune(data_path_root);
+	vglSetCircularPoolSize(tune_pool_kb * 1024);
 	vglSetSemanticBindingMode(VGL_MODE_POSTPONED);
 	if (debugMode)
 		vglSetDisplayCallback(mem_profiler);
@@ -3484,6 +3614,8 @@ void *pthread_main(void *arg) {
 	else
 		vglInitExtended(0, SCREEN_W, SCREEN_H, MEMORY_VITAGL_THRESHOLD_MB * 1024 * 1024, SCE_GXM_MULTISAMPLE_NONE);
 	vgl_booted = 1;
+	if (!tune_vsync)
+		vglWaitVblankStart(GL_FALSE);
 	
 	// Applying extra patches to the runner
 	patch_runner_post_init();
