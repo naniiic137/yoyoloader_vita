@@ -358,7 +358,67 @@ PERF_WRAP0(PS_AUDIO, perf_step_audio)
 void perf_step_layers(void *rect, int a) { uint64_t t = perf_now(); SO_CONTINUE(int, perf_hook[PS_LAYERS], rect, a); perf_step_us[PS_LAYERS] += perf_now() - t; }
 void perf_step_finish(int a) { uint64_t t = perf_now(); SO_CONTINUE(int, perf_hook[PS_FINISH], a); perf_step_us[PS_FINISH] += perf_now() - t; }
 
+/*
+ * perf=2 adds a deeper probe of the draw step: GML code execution and the GML drawing built-ins.
+ * These run thousands of times a frame, so only the original call is timed (the hook's own
+ * restore/re-patch cost is left out), but the game itself runs slower in this mode.
+ */
+enum { PB_CODE, PB_SPRITE, PB_TEXT, PB_SURFACE, PB_SURFTARGET, PB_RECT, PB_PAGELOAD, PB_COUNT };
+static const char *perf_probe_name[PB_COUNT] = { "GML code", "draw_sprite*", "draw_text*", "draw_surface*", "surface_set_target", "draw_rectangle", "page loads" };
+static uint64_t perf_probe_us[PB_COUNT];
+static uint32_t perf_probe_calls[PB_COUNT];
+
+typedef struct { const char *sym; int cat; so_hook h; } perf_probe_t;
+static perf_probe_t perf_probe[] = {
+	{ "_Z12Code_ExecuteP9CInstanceS0_P5CCodeP6RValuei", PB_CODE },
+	{ "_Z12F_DrawSpriteR6RValueP9CInstanceS2_iPS_", PB_SPRITE },
+	{ "_Z15F_DrawSpriteExtR6RValueP9CInstanceS2_iPS_", PB_SPRITE },
+	{ "_Z16F_DrawSpritePartR6RValueP9CInstanceS2_iPS_", PB_SPRITE },
+	{ "_Z19F_DrawSpriteGeneralR6RValueP9CInstanceS2_iPS_", PB_SPRITE },
+	{ "_Z10F_DrawTextR6RValueP9CInstanceS2_iPS_", PB_TEXT },
+	{ "_Z13F_DrawTextExtR6RValueP9CInstanceS2_iPS_", PB_TEXT },
+	{ "_Z15F_DrawTextColorR6RValueP9CInstanceS2_iPS_", PB_TEXT },
+	{ "_Z18F_DrawTextExtColorR6RValueP9CInstanceS2_iPS_", PB_TEXT },
+	{ "_Z21F_DrawTextTransformedR6RValueP9CInstanceS2_iPS_", PB_TEXT },
+	{ "_Z13F_DrawSurfaceR6RValueP9CInstanceS2_iPS_", PB_SURFACE },
+	{ "_Z16F_DrawSurfaceExtR6RValueP9CInstanceS2_iPS_", PB_SURFACE },
+	{ "_Z17F_DrawSurfacePartR6RValueP9CInstanceS2_iPS_", PB_SURFACE },
+	{ "_Z22F_DrawSurfaceStretchedR6RValueP9CInstanceS2_iPS_", PB_SURFACE },
+	{ "_Z18F_SurfaceSetTargetR6RValueP9CInstanceS2_iPS_", PB_SURFTARGET },
+	{ "_Z15F_DrawRectangleR6RValueP9CInstanceS2_iPS_", PB_RECT },
+};
+#define PERF_NPROBE (sizeof(perf_probe) / sizeof(perf_probe[0]))
+
+// Restore the original code, time just the call, then re-patch.
+#define PERF_PROBE_CALL(i, ...) ({ \
+	so_hook *h = &perf_probe[i].h; \
+	kuKernelCpuUnrestrictedMemcpy((void *)h->addr, h->orig_instr, sizeof(h->orig_instr)); \
+	kuKernelFlushCaches((void *)h->addr, sizeof(h->orig_instr)); \
+	uint64_t t0 = perf_now(); \
+	int r = h->thumb_addr ? ((int(*)())h->thumb_addr)(__VA_ARGS__) : ((int(*)())h->addr)(__VA_ARGS__); \
+	perf_probe_us[perf_probe[i].cat] += perf_now() - t0; \
+	perf_probe_calls[perf_probe[i].cat]++; \
+	kuKernelCpuUnrestrictedMemcpy((void *)h->addr, h->patch_instr, sizeof(h->patch_instr)); \
+	kuKernelFlushCaches((void *)h->addr, sizeof(h->patch_instr)); \
+	r; })
+
+#define PERF_PROBE_FN(i) \
+	int perf_probe_fn##i(void *a, void *b, void *c, int d, void *e) { return PERF_PROBE_CALL(i, a, b, c, d, e); }
+PERF_PROBE_FN(0) PERF_PROBE_FN(1) PERF_PROBE_FN(2) PERF_PROBE_FN(3) PERF_PROBE_FN(4) PERF_PROBE_FN(5)
+PERF_PROBE_FN(6) PERF_PROBE_FN(7) PERF_PROBE_FN(8) PERF_PROBE_FN(9) PERF_PROBE_FN(10) PERF_PROBE_FN(11)
+PERF_PROBE_FN(12) PERF_PROBE_FN(13) PERF_PROBE_FN(14) PERF_PROBE_FN(15)
+static void *perf_probe_fns[] = { perf_probe_fn0, perf_probe_fn1, perf_probe_fn2, perf_probe_fn3, perf_probe_fn4,
+	perf_probe_fn5, perf_probe_fn6, perf_probe_fn7, perf_probe_fn8, perf_probe_fn9, perf_probe_fn10, perf_probe_fn11,
+	perf_probe_fn12, perf_probe_fn13, perf_probe_fn14, perf_probe_fn15 };
+
 void perf_install_hooks(void) {
+	if (tune_perf >= 2) {
+		for (unsigned i = 0; i < PERF_NPROBE && i < sizeof(perf_probe_fns) / sizeof(perf_probe_fns[0]); i++) {
+			uintptr_t addr = so_symbol(&yoyoloader_mod, perf_probe[i].sym);
+			if (addr)
+				perf_probe[i].h = hook_addr(addr, (uintptr_t)perf_probe_fns[i]);
+		}
+	}
 	void *wrap[PS_COUNT] = { perf_step_begin, perf_step_io, perf_step_update, perf_step_collision, perf_step_draw,
 		perf_step_layers, perf_step_finish, perf_step_end, perf_step_audio };
 	for (int i = 0; i < PS_COUNT; i++) {
@@ -395,7 +455,7 @@ void perf_frame(uint64_t process_us, uint64_t swap_us) {
 	if (++frames < 120)
 		return;
 	uint64_t elapsed = now - start;
-	char line[1024];
+	char line[2048];
 	int len = snprintf(line, sizeof(line),
 		"[PERF] pool=%dKB vsync=%d | %.1f fps | per frame: total %.1f ms, runner Process %.1f ms "
 		"(of which GL calls %.1f ms), swap %.1f ms, worst frame %.1f ms | %u draws, %u buffer uploads "
@@ -408,6 +468,15 @@ void perf_frame(uint64_t process_us, uint64_t swap_us) {
 		len += snprintf(line + len, sizeof(line) - len, " %s %.1f%s", perf_step_name[i], sum_step[i] / 1000.0 / frames,
 			i == PS_COUNT - 1 ? "\n" : ",");
 		sum_step[i] = 0;
+	}
+	if (tune_perf >= 2) {
+		len += snprintf(line + len, sizeof(line) - len, "        probe (ms and calls per frame):");
+		for (int i = 0; i < PB_COUNT; i++) {
+			len += snprintf(line + len, sizeof(line) - len, " %s %.1f ms / %u%s", perf_probe_name[i],
+				perf_probe_us[i] / 1000.0 / frames, perf_probe_calls[i] / frames, i == PB_COUNT - 1 ? "\n" : ",");
+			perf_probe_us[i] = 0;
+			perf_probe_calls[i] = 0;
+		}
 	}
 	SceUID fd = sceIoOpen("ux0:data/gms/shared/perf.log", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
 	if (fd >= 0) {
@@ -1605,7 +1674,20 @@ static void compare_page_with_pvr(uint8_t *blob, uint32_t blob_size, uint32_t *r
 		debugPrintf("[CMP] page %d: identical to runner decode\n", page);
 }
 
+static int LoadTextureFromQOIF_impl(uint32_t *texture, int has_mips);
+
+// Page loads (first load or reload after eviction), timed for the perf log
 int LoadTextureFromQOIF_hook(uint32_t *texture, int has_mips) {
+	if (tune_perf < 2)
+		return LoadTextureFromQOIF_impl(texture, has_mips);
+	uint64_t t0 = perf_now();
+	int r = LoadTextureFromQOIF_impl(texture, has_mips);
+	perf_probe_us[PB_PAGELOAD] += perf_now() - t0;
+	perf_probe_calls[PB_PAGELOAD]++;
+	return r;
+}
+
+static int LoadTextureFromQOIF_impl(uint32_t *texture, int has_mips) {
 	// gm_textures.py QOI placeholders (real size in the header, marker at +37): load the .pvr
 	uint8_t *blob = (uint8_t *)texture[24];
 	if (blob && texture[25] >= 49 && !memcmp(blob + 37, "yyLdYYLP", 8)) {
