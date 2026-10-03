@@ -459,6 +459,9 @@ enum { LC_MALLOC, LC_FREE, LC_REALLOC, LC_SQRT, LC_FLOOR, LC_POW, LC_FMOD, LC_TR
 static const char *perf_lc_name[LC_COUNT] = { "malloc", "free", "realloc", "sqrt", "floor", "pow", "fmod", "sin/cos/atan2", "strcmp", "strlen" };
 static uint32_t perf_lc[LC_COUNT];
 
+// libvorbis (linked after libm) still needs the C library's sqrt/sqrtf: keep them referenced here
+void *keep_libm_sqrt[2] = { (void *)&sqrt, (void *)&sqrtf };
+
 static inline double fast_sqrt(double x) {
 	double r;
 	__asm__("vsqrt.f64 %P0, %P1" : "=w"(r) : "w"(x));
