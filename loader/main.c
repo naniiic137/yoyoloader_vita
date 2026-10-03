@@ -275,6 +275,7 @@ void read_tune(const char *game_root) {
 
 // Counters for the perf log (only touched when tune_perf is on)
 static uint64_t perf_gl_us;
+static uint32_t perf_drawn; // frames that actually ran the draw step
 static uint32_t perf_draws, perf_buffers, perf_buffer_bytes, perf_tex_uploads;
 
 static inline uint64_t perf_now(void) {
@@ -457,7 +458,6 @@ void perf_install_hooks(void) {
 enum { LC_MALLOC, LC_FREE, LC_REALLOC, LC_SQRT, LC_FLOOR, LC_POW, LC_FMOD, LC_TRIG, LC_STRCMP, LC_STRLEN, LC_COUNT };
 static const char *perf_lc_name[LC_COUNT] = { "malloc", "free", "realloc", "sqrt", "floor", "pow", "fmod", "sin/cos/atan2", "strcmp", "strlen" };
 static uint32_t perf_lc[LC_COUNT];
-static uint32_t perf_drawn;
 
 static inline double fast_sqrt(double x) {
 	double r;
