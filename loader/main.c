@@ -240,6 +240,8 @@ int debugPrintf(char *text, ...) {
 int tune_pool_kb = 3;
 int tune_vsync = 1;
 int tune_perf = 0;
+int tune_frameskip = 0; // frameskip=N: run the draw step on 1 frame out of N+1 (game logic still runs every frame)
+int frame_skipped = 0;   // set by the draw-step wrapper when it skipped drawing this frame (then don't swap)
 
 void read_tune(const char *game_root) {
 	char path[512], buf[512];
@@ -259,6 +261,12 @@ void read_tune(const char *game_root) {
 		tune_vsync = atoi(s + 6);
 	if ((s = strstr(buf, "perf=")))
 		tune_perf = atoi(s + 5);
+	if ((s = strstr(buf, "frameskip=")))
+		tune_frameskip = atoi(s + 10);
+	if (tune_frameskip < 0)
+		tune_frameskip = 0;
+	if (tune_frameskip > 3)
+		tune_frameskip = 3;
 	if (tune_pool_kb < 3)
 		tune_pool_kb = 3;
 	if (tune_pool_kb > 16 * 1024)
@@ -352,7 +360,19 @@ PERF_WRAP0(PS_BEGIN, perf_step_begin)
 PERF_WRAP0(PS_IO, perf_step_io)
 PERF_WRAP0(PS_UPDATE, perf_step_update)
 PERF_WRAP0(PS_COLLISION, perf_step_collision)
-PERF_WRAP0(PS_DRAW, perf_step_draw)
+// The draw step also implements frameskip: on skipped frames it returns without drawing.
+void perf_step_draw(void) {
+	static uint32_t fs_counter;
+	if (tune_frameskip && (fs_counter++ % (tune_frameskip + 1)) != 0) {
+		frame_skipped = 1;
+		return;
+	}
+	frame_skipped = 0;
+	perf_drawn++;
+	uint64_t t = perf_now();
+	SO_CONTINUE(int, perf_hook[PS_DRAW]);
+	perf_step_us[PS_DRAW] += perf_now() - t;
+}
 PERF_WRAP0(PS_END, perf_step_end)
 PERF_WRAP0(PS_AUDIO, perf_step_audio)
 void perf_step_layers(void *rect, int a) { uint64_t t = perf_now(); SO_CONTINUE(int, perf_hook[PS_LAYERS], rect, a); perf_step_us[PS_LAYERS] += perf_now() - t; }
@@ -422,11 +442,47 @@ void perf_install_hooks(void) {
 	void *wrap[PS_COUNT] = { perf_step_begin, perf_step_io, perf_step_update, perf_step_collision, perf_step_draw,
 		perf_step_layers, perf_step_finish, perf_step_end, perf_step_audio };
 	for (int i = 0; i < PS_COUNT; i++) {
+		if (!tune_perf && i != PS_DRAW)
+			continue; // frameskip alone only needs the draw step
 		uintptr_t addr = so_symbol(&yoyoloader_mod, perf_step_sym[i]);
 		if (addr)
 			perf_hook[i] = hook_addr(addr, (uintptr_t)wrap[i]);
 	}
 }
+
+/*
+ * Library calls the runner makes (counted with perf=1, cheap: one increment), plus a hardware
+ * square root: vsqrt.f64 instead of the C library's sqrt, which may be done in software.
+ */
+enum { LC_MALLOC, LC_FREE, LC_REALLOC, LC_SQRT, LC_FLOOR, LC_POW, LC_FMOD, LC_TRIG, LC_STRCMP, LC_STRLEN, LC_COUNT };
+static const char *perf_lc_name[LC_COUNT] = { "malloc", "free", "realloc", "sqrt", "floor", "pow", "fmod", "sin/cos/atan2", "strcmp", "strlen" };
+static uint32_t perf_lc[LC_COUNT];
+static uint32_t perf_drawn;
+
+static inline double fast_sqrt(double x) {
+	double r;
+	__asm__("vsqrt.f64 %P0, %P1" : "=w"(r) : "w"(x));
+	return r;
+}
+static inline float fast_sqrtf(float x) {
+	float r;
+	__asm__("vsqrt.f32 %0, %1" : "=t"(r) : "t"(x));
+	return r;
+}
+void *lc_malloc(size_t n) { if (tune_perf) perf_lc[LC_MALLOC]++; return vglMalloc(n); }
+void lc_free(void *p) { if (tune_perf) perf_lc[LC_FREE]++; vglFree(p); }
+void *lc_realloc(void *p, size_t n) { if (tune_perf) perf_lc[LC_REALLOC]++; return vglRealloc(p, n); }
+void *lc_calloc(size_t a, size_t b) { if (tune_perf) perf_lc[LC_MALLOC]++; return vglCalloc(a, b); }
+double lc_sqrt(double x) { if (tune_perf) perf_lc[LC_SQRT]++; return fast_sqrt(x); }
+float lc_sqrtf(float x) { if (tune_perf) perf_lc[LC_SQRT]++; return fast_sqrtf(x); }
+double lc_floor(double x) { if (tune_perf) perf_lc[LC_FLOOR]++; return floor(x); }
+double lc_pow(double a, double b) { if (tune_perf) perf_lc[LC_POW]++; return pow(a, b); }
+double lc_fmod(double a, double b) { if (tune_perf) perf_lc[LC_FMOD]++; return fmod(a, b); }
+double lc_sin(double x) { if (tune_perf) perf_lc[LC_TRIG]++; return sin(x); }
+double lc_cos(double x) { if (tune_perf) perf_lc[LC_TRIG]++; return cos(x); }
+double lc_atan2(double a, double b) { if (tune_perf) perf_lc[LC_TRIG]++; return atan2(a, b); }
+int lc_strcmp(const char *a, const char *b) { if (tune_perf) perf_lc[LC_STRCMP]++; return strcmp(a, b); }
+size_t lc_strlen(const char *s) { if (tune_perf) perf_lc[LC_STRLEN]++; return strlen(s); }
 
 // Called once per frame with the time spent in the runner's Process and in the buffer swap.
 void perf_frame(uint64_t process_us, uint64_t swap_us) {
@@ -468,6 +524,13 @@ void perf_frame(uint64_t process_us, uint64_t swap_us) {
 		len += snprintf(line + len, sizeof(line) - len, " %s %.1f%s", perf_step_name[i], sum_step[i] / 1000.0 / frames,
 			i == PS_COUNT - 1 ? "\n" : ",");
 		sum_step[i] = 0;
+	}
+	len += snprintf(line + len, sizeof(line) - len, "        frameskip=%d, drawn %.1f fps | library calls per frame:", tune_frameskip,
+		perf_drawn * 1000000.0 / (double)elapsed);
+	perf_drawn = 0;
+	for (int i = 0; i < LC_COUNT; i++) {
+		len += snprintf(line + len, sizeof(line) - len, " %s %u%s", perf_lc_name[i], perf_lc[i] / frames, i == LC_COUNT - 1 ? "\n" : ",");
+		perf_lc[i] = 0;
 	}
 	if (tune_perf >= 2) {
 		len += snprintf(line + len, sizeof(line) - len, "        probe (ms and calls per frame):");
@@ -1042,7 +1105,7 @@ void main_loop() {
 	
 	setup_ended = 1;
 	glReleaseShaderCompiler();
-	if (tune_perf)
+	if (tune_perf || tune_frameskip)
 		perf_install_hooks();
 	for (;;) {
 		if (post_active) {
@@ -1149,6 +1212,7 @@ void main_loop() {
 				(unsigned)mi.uordblks / 1024, newlib_heap_used() / 1024, _newlib_heap_size / 1024, vglMemFree(VGL_MEM_RAM) / 1024, vglMemFree(VGL_MEM_VRAM) / 1024,
 				vglMemFree(VGL_MEM_PHYCONT) / 1024, vglMemFree(VGL_MEM_ALL) / 1024, tex_lru_bytes / 1024, tex_lru_num);
 		}
+		frame_skipped = 0;
 		uint64_t perf_t0 = tune_perf ? perf_now() : 0;
 		uint64_t perf_swap_us = 0;
 		if (!is_portrait)
@@ -1156,7 +1220,7 @@ void main_loop() {
 		else
 			Java_com_yoyogames_runner_RunnerJNILib_Process(fake_env, 0, SCREEN_H, SCREEN_W, sensor.accelerometer.x, sensor.accelerometer.y, sensor.accelerometer.z, 0, 0x3FF00000, 60.0f);
 		uint64_t perf_process_us = tune_perf ? perf_now() - perf_t0 : 0;
-		if (!Java_com_yoyogames_runner_RunnerJNILib_canFlip || Java_com_yoyogames_runner_RunnerJNILib_canFlip()) {
+		if (!frame_skipped && (!Java_com_yoyogames_runner_RunnerJNILib_canFlip || Java_com_yoyogames_runner_RunnerJNILib_canFlip())) {
 			if (is_portrait) {
 				int prog;
 				glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
@@ -2659,7 +2723,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "asinf", (uintptr_t)&asinf },
 	{ "asinh", (uintptr_t)&asinh },
 	{ "atan", (uintptr_t)&atan },
-	{ "atan2", (uintptr_t)&atan2 },
+	{ "atan2", (uintptr_t)&lc_atan2 },
 	{ "atan2f", (uintptr_t)&atan2f },
 	{ "atanf", (uintptr_t)&atanf },
 	{ "atoi", (uintptr_t)&atoi },
@@ -2668,7 +2732,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "bind", (uintptr_t)&bind },
 	{ "bsearch", (uintptr_t)&bsearch },
 	{ "btowc", (uintptr_t)&btowc },
-	{ "calloc", (uintptr_t)&vglCalloc },
+	{ "calloc", (uintptr_t)&lc_calloc },
 	{ "ceil", (uintptr_t)&ceil },
 	{ "ceilf", (uintptr_t)&ceilf },
 	{ "clearerr", (uintptr_t)&clearerr },
@@ -2676,7 +2740,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "close", (uintptr_t)&close },
 	{ "compress", (uintptr_t)&compress },	
 	//{ "connect", (uintptr_t)&connect },
-	{ "cos", (uintptr_t)&cos },
+	{ "cos", (uintptr_t)&lc_cos },
 	{ "cosf", (uintptr_t)&cosf },
 	{ "cosh", (uintptr_t)&cosh },
 	{ "crc32", (uintptr_t)&crc32 },
@@ -2701,20 +2765,20 @@ static so_default_dynlib default_dynlib[] = {
 	{ "fgetpos", (uintptr_t)&fgetpos },
 	{ "fgetc", (uintptr_t)&fgetc },
 	{ "fgets", (uintptr_t)&fgets },
-	{ "floor", (uintptr_t)&floor },
+	{ "floor", (uintptr_t)&lc_floor },
 	{ "floorf", (uintptr_t)&floorf },
 	{ "fmax", (uintptr_t)&fmax },
 	{ "fmaxf", (uintptr_t)&fmaxf },
 	{ "fmin", (uintptr_t)&fmin },
 	{ "fminf", (uintptr_t)&fminf },
-	{ "fmod", (uintptr_t)&fmod },
+	{ "fmod", (uintptr_t)&lc_fmod },
 	{ "fmodf", (uintptr_t)&fmodf },
 	{ "fopen", (uintptr_t)&fopen_hook },
 	{ "fprintf", (uintptr_t)&fprintf },
 	{ "fputc", (uintptr_t)&fputc },
 	{ "fputs", (uintptr_t)&fputs },
 	{ "fread", (uintptr_t)&fread },
-	{ "free", (uintptr_t)&vglFree },
+	{ "free", (uintptr_t)&lc_free },
 	{ "freelocale", (uintptr_t)&freelocale },
 	//{ "freeaddrinfo", (uintptr_t)&freeaddrinfo },
 	{ "frexp", (uintptr_t)&frexp },
@@ -2838,7 +2902,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "lround", (uintptr_t)&lround },
 	{ "lroundf", (uintptr_t)&lroundf },
 	{ "lseek", (uintptr_t)&lseek },
-	{ "malloc", (uintptr_t)&vglMalloc },
+	{ "malloc", (uintptr_t)&lc_malloc },
 	{ "mbtowc", (uintptr_t)&mbtowc },
 	{ "mbrlen", (uintptr_t)&mbrlen },
 	{ "mbrtowc", (uintptr_t)&mbrtowc },
@@ -2860,7 +2924,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "newlocale", (uintptr_t)&newlocale },
 	{ "open", (uintptr_t)&open },
 	{ "posix_memalign", (uintptr_t)&posix_memalign },
-	{ "pow", (uintptr_t)&pow },
+	{ "pow", (uintptr_t)&lc_pow },
 	{ "powf", (uintptr_t)&powf },
 	{ "printf", (uintptr_t)&debugPrintf },
 	{ "pthread_attr_destroy", (uintptr_t)&pthread_attr_destroy_soloader },
@@ -2920,7 +2984,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "putwc", (uintptr_t)&putwc },
 	{ "qsort", (uintptr_t)&qsort },
 	{ "read", (uintptr_t)&read },
-	{ "realloc", (uintptr_t)&vglRealloc },
+	{ "realloc", (uintptr_t)&lc_realloc },
 	//{ "recv", (uintptr_t)&recv },
 	//{ "recvfrom", (uintptr_t)&recvfrom },
 	{ "remove", (uintptr_t)&sceIoRemove },
@@ -2936,7 +3000,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "setlocale", (uintptr_t)&ret0 },
 	//{ "setsockopt", (uintptr_t)&setsockopt },
 	{ "setvbuf", (uintptr_t)&setvbuf },
-	{ "sin", (uintptr_t)&sin },
+	{ "sin", (uintptr_t)&lc_sin },
 	{ "sincos", (uintptr_t)&sincos },
 	{ "sincosf", (uintptr_t)&sincosf },
 	{ "sinf", (uintptr_t)&sinf },
@@ -2944,8 +3008,8 @@ static so_default_dynlib default_dynlib[] = {
 	{ "snprintf", (uintptr_t)&snprintf },
 	{ "socket", (uintptr_t)&socket },
 	{ "sprintf", (uintptr_t)&sprintf },
-	{ "sqrt", (uintptr_t)&sqrt },
-	{ "sqrtf", (uintptr_t)&sqrtf },
+	{ "sqrt", (uintptr_t)&lc_sqrt },
+	{ "sqrtf", (uintptr_t)&lc_sqrtf },
 	{ "srand", (uintptr_t)&srand },
 	{ "srand48", (uintptr_t)&srand48 },
 	{ "sscanf", (uintptr_t)&sscanf },
@@ -2953,7 +3017,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "strcasecmp", (uintptr_t)&strcasecmp },
 	{ "strcat", (uintptr_t)&strcat },
 	{ "strchr", (uintptr_t)&strchr },
-	{ "strcmp", (uintptr_t)&strcmp },
+	{ "strcmp", (uintptr_t)&lc_strcmp },
 	{ "strcoll", (uintptr_t)&strcoll },
 	{ "strcpy", (uintptr_t)&strcpy },
 	{ "strcspn", (uintptr_t)&strcspn },
@@ -2962,7 +3026,7 @@ static so_default_dynlib default_dynlib[] = {
 	{ "strerror", (uintptr_t)&strerror },
 	{ "strerror_r", (uintptr_t)&strerror_r },
 	{ "strftime", (uintptr_t)&strftime },
-	{ "strlen", (uintptr_t)&strlen },
+	{ "strlen", (uintptr_t)&lc_strlen },
 	{ "strncasecmp", (uintptr_t)&sceClibStrncasecmp },
 	{ "strncat", (uintptr_t)&sceClibStrncat },
 	{ "strncmp", (uintptr_t)&sceClibStrncmp },
